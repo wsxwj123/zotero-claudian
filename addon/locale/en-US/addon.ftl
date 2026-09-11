@@ -1,0 +1,25 @@
+hello-section-header = Claude
+    .tooltiptext = zotero-claudian chat
+hello-section-sidenav =
+    .tooltiptext = zotero-claudian chat
+chrome-register-failed = zotero-claudian: chrome registration failed, the UI cannot load. Check Help → Debug Output Logging for details.
+main-tab-button =
+    .tooltiptext = Open Claude in a tab
+prefs-pane-label = zotero-claudian
+prefs-pane-title = Claude workbench
+prefs-pane-intro = Settings for the Claude Code workbench: the AI's working directory, the default permission mode for new sessions, and the path to the claude executable. Changes apply immediately; running conversations are not interrupted.
+prefs-workspace-label = Workspace directory
+prefs-workspace-browse = Browse…
+prefs-workspace-hint-empty = Leave empty to use the default: { $path }
+prefs-workspace-hint-ok = Directory is ready (AI file output lands here)
+prefs-workspace-hint-missing = Directory does not exist yet; it will be created on the next turn
+prefs-workspace-hint-relative = Must be an absolute path (e.g. /Users/… or C:\…); a relative path cannot be used as the AI working directory
+prefs-mode-label = Default permission mode for new sessions
+prefs-mode-hint = default = confirm each sensitive action; acceptEdits = allow file edits by default (recommended); plan = read-only planning
+prefs-mode-item-default = default — confirm each step
+prefs-mode-item-acceptEdits = acceptEdits — allow file edits (recommended)
+prefs-mode-item-plan = plan — read-only planning
+prefs-cli-label = Path to the claude executable
+prefs-cli-hint-empty = Leave empty to auto-detect (PATH and common install locations)
+prefs-cli-hint-ok = Path is valid
+prefs-cli-hint-missing = Path does not exist: falling back to auto-detection; a notice will appear at the top of the chat page

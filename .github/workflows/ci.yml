@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # BRIEF 平台要求：macOS 与 Windows 双矩阵（契约层跨平台由 CI 判定；真机行为另有人工验收）
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Acceptance tests (locked contract tests)
+        # 引号形式让 tsx/node 自行解析 glob（Windows runner 的 pwsh 不展开 glob）
+        run: npx tsx --test "tests/acceptance/*.test.mjs"
+
+      - name: Unit tests (ts)
+        run: npx tsx --test "tests/unit/*.ts"
+
+      - name: Unit tests (mjs)
+        run: npx tsx --test "tests/unit/*.test.mjs"
+
+      - name: Build XPI
+        run: npm run build
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
