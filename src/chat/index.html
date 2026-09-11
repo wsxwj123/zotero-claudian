@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- 安全兜底（重要 4）：本页是 chrome:// 特权页面，脚本只跑同源 bundle、样式全在页内、
+         页面自身不做任何网络 I/O（与宿主全靠 postMessage）。CSP 把「渲染产物带出远程请求」的
+         可能性按默认拒绝封死：本页不需要任何图片（markdown 渲染白名单也不含 img），故不设
+         img-src——回落到 default-src 'none'，连同源/data: 图片也一律拒绝。
+         与 markdown.ts 的消毒白名单互为第二道防线（一处在渲染层削元素，一处在文档层拒请求）。 -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; font-src 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1f2328;
+        --muted: #656d76;
+        --border: #d8dee4;
+        --accent: #0969da;
+        --user-bg: #ddf4ff;
+        --banner-bg: #fff1e5;
+        --banner-fg: #bc4c00;
+        --code-bg: #f6f8fa;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #15191e;
+          --fg: #e6ebf0;
+          --muted: #9198a1;
+          --border: #30363d;
+          --accent: #58a6ff;
+          --user-bg: #12324a;
+          --banner-bg: #3a2417;
+          --banner-fg: #ffa37d;
+          --code-bg: #22272e;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font:
+          13px/1.55 -apple-system,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      #app,
+      .app {
+        height: 100%;
+      }
+      .app {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        flex: none;
+      }
+      .header-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* F6：顶栏权限档三档切换（PLAN §2），靠右贴边 */
+      .perm-mode {
+        margin-left: auto;
+        flex: none;
+        font: inherit;
+        font-size: 12px;
+        color: var(--muted);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 2px 6px;
+        cursor: pointer;
+      }
+      .perm-mode:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot.on {
+        background: #2da44e;
+      }
+      .dot.off {
+        background: var(--muted);
+      }
+
+      .sessions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border);
+        flex: none;
+      }
+      .session-select {
+        flex: 1;
+        min-width: 0;
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 3px 6px;
+      }
+      /* 会话改名：输入框顶掉下拉框占位（同一行，不挤压别的按钮） */
+      .session-rename-input {
+        flex: 1;
+        min-width: 0;
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 3px 6px;
+      }
+      .session-select:disabled,
+      .session-new:disabled,
+      .session-rename:disabled,
+      .session-del:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .session-new,
+      .session-rename,
+      .session-del,
+      .banner-action {
+        flex: none;
+        font: inherit;
+        padding: 3px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: none;
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .session-del.confirm {
+        border-color: var(--banner-fg);
+        color: var(--banner-fg);
+      }
+      .banner-action {
+        border-color: currentColor;
+        color: inherit;
+      }
+
+      .banner {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 8px 12px;
+        background: var(--banner-bg);
+        color: var(--banner-fg);
+        border-bottom: 1px solid var(--border);
+        white-space: pre-wrap;
+        word-break: break-word;
+        flex: none;
+      }
+      .banner-text {
+        flex: 1;
+      }
+      .banner-close {
+        background: none;
+        border: none;
+        color: inherit;
+        cursor: pointer;
+        font-size: 15px;
+        line-height: 1;
+        padding: 0 2px;
+      }
+
+      .messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+      }
+      .empty {
+        color: var(--muted);
+        text-align: center;
+        margin-top: 40px;
+      }
+
+      .msg {
+        margin-bottom: 14px;
+      }
+      .msg.user {
+        background: var(--user-bg);
+        border-radius: 8px;
+        padding: 8px 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin-left: 48px;
+      }
+
+      .md > :first-child {
+        margin-top: 0;
+      }
+      .md > :last-child {
+        margin-bottom: 0;
+      }
+      .md p {
+        margin: 0.4em 0;
+      }
+      .md a {
+        color: var(--accent);
+      }
+      .md pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        overflow-x: auto;
+        font-size: 12px;
+      }
+      .md code {
+        background: var(--code-bg);
+        border-radius: 4px;
+        padding: 1px 4px;
+        font-size: 12px;
+      }
+      .md pre code {
+        background: none;
+        padding: 0;
+      }
+      .md table {
+        border-collapse: collapse;
+        margin: 0.6em 0;
+      }
+      .md th,
+      .md td {
+        border: 1px solid var(--border);
+        padding: 4px 10px;
+      }
+      .md blockquote {
+        border-left: 3px solid var(--border);
+        margin: 0.6em 0;
+        padding: 0 10px;
+        color: var(--muted);
+      }
+
+      .msg-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .note-save,
+      .note-opt,
+      .note-cancel {
+        font: inherit;
+        font-size: 12px;
+        padding: 2px 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: none;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .note-save:hover:not(:disabled),
+      .note-opt:hover,
+      .note-cancel:hover {
+        color: var(--fg);
+        border-color: var(--accent);
+      }
+      .note-save:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .note-picker {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 6px;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        max-width: 100%;
+      }
+      .note-opt {
+        max-width: 260px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .note-hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .streaming::after {
+        content: "▍";
+        animation: blink 1s steps(2) infinite;
+        color: var(--muted);
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      details.thinking,
+      details.tool {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin: 6px 0;
+        padding: 4px 10px;
+        background: var(--code-bg);
+      }
+      details.thinking summary,
+      details.tool summary {
+        cursor: pointer;
+        color: var(--muted);
+        user-select: none;
+        font-size: 12px;
+      }
+      .thinking-body {
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--muted);
+        padding: 6px 2px;
+      }
+      pre.tool-input,
+      pre.tool-result {
+        margin: 6px 0 2px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        overflow-x: auto;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      pre.tool-result.error {
+        color: var(--banner-fg);
+        border-color: var(--banner-fg);
+      }
+
+      .perms {
+        flex: none;
+        max-height: 45vh;
+        overflow-y: auto;
+        border-top: 1px solid var(--border);
+      }
+      .perm {
+        border-bottom: 1px solid var(--border);
+        background: var(--banner-bg);
+        color: var(--banner-fg);
+        padding: 8px 12px;
+      }
+      .perm-head {
+        font-size: 12px;
+      }
+      pre.perm-summary {
+        margin: 6px 0;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--bg);
+        color: var(--fg);
+        font-size: 12px;
+        max-height: 180px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      details.perm-raw summary {
+        cursor: pointer;
+        font-size: 12px;
+        user-select: none;
+      }
+      details.perm-raw pre {
+        margin: 4px 0 0;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--code-bg);
+        color: var(--fg);
+        font-size: 12px;
+        max-height: 200px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .perm-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .perm-actions button {
+        font: inherit;
+        padding: 4px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .perm-allow,
+      .perm-remember {
+        border-color: currentColor;
+      }
+      .perm-deny {
+        color: var(--banner-fg);
+        border-color: currentColor;
+      }
+
+      .status {
+        flex: none;
+        padding: 4px 12px;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+        font-size: 12px;
+      }
+
+      .input-row {
+        flex: none;
+        display: flex;
+        gap: 8px;
+        padding: 8px 12px 12px;
+        border-top: 1px solid var(--border);
+        align-items: flex-end;
+      }
+      .input {
+        flex: 1;
+        resize: none;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font: inherit;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .input:focus {
+        outline: 1px solid var(--accent);
+        border-color: transparent;
+      }
+      .input:disabled {
+        opacity: 0.6;
+      }
+      .send,
+      .interrupt {
+        border: none;
+        border-radius: 6px;
+        padding: 6px 14px;
+        cursor: pointer;
+        font: inherit;
+        flex: none;
+      }
+      .send {
+        background: var(--accent);
+        color: #fff;
+      }
+      .send:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .interrupt {
+        background: none;
+        border: 1px solid var(--border);
+        color: var(--fg);
+      }
+      .interrupt:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="./chat.js"></script>
+  </body>
+</html>

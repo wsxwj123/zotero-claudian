@@ -1,0 +1,74 @@
+<groupbox
+  id="__addonRef__-prefs"
+  onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })"
+>
+  <label><html:h2 id="__addonRef__-prefs-title"></html:h2></label>
+  <description id="__addonRef__-prefs-intro"></description>
+
+  <hbox align="center">
+    <label
+      id="__addonRef__-pref-workspace-label"
+      control="__addonRef__-pref-workspace"
+    ></label>
+    <html:input
+      type="text"
+      id="__addonRef__-pref-workspace"
+      class="directory-path"
+      preference="__prefsPrefix__.workspacePath"
+      flex="1"
+      aria-labelledby="__addonRef__-pref-workspace-label"
+    ></html:input>
+    <button id="__addonRef__-pref-workspace-browse"></button>
+  </hbox>
+  <description id="__addonRef__-pref-workspace-hint"></description>
+
+  <hbox align="center">
+    <label
+      id="__addonRef__-pref-mode-label"
+      control="__addonRef__-pref-mode"
+    ></label>
+    <menulist
+      id="__addonRef__-pref-mode"
+      preference="__prefsPrefix__.defaultPermissionMode"
+      native="true"
+      aria-labelledby="__addonRef__-pref-mode-label"
+    >
+      <menupopup>
+        <menuitem
+          id="__addonRef__-pref-mode-default"
+          value="default"
+        ></menuitem>
+        <menuitem
+          id="__addonRef__-pref-mode-acceptEdits"
+          value="acceptEdits"
+        ></menuitem>
+        <menuitem id="__addonRef__-pref-mode-plan" value="plan"></menuitem>
+      </menupopup>
+    </menulist>
+  </hbox>
+  <description id="__addonRef__-pref-mode-hint"></description>
+
+  <hbox align="center">
+    <checkbox
+      id="__addonRef__-pref-auto-show"
+      preference="__prefsPrefix__.autoShowPane"
+    ></checkbox>
+  </hbox>
+  <description id="__addonRef__-pref-auto-show-hint"></description>
+
+  <hbox align="center">
+    <label
+      id="__addonRef__-pref-cli-label"
+      control="__addonRef__-pref-cli-path"
+    ></label>
+    <html:input
+      type="text"
+      id="__addonRef__-pref-cli-path"
+      class="directory-path"
+      preference="__prefsPrefix__.cliPathOverride"
+      flex="1"
+      aria-labelledby="__addonRef__-pref-cli-label"
+    ></html:input>
+  </hbox>
+  <description id="__addonRef__-pref-cli-hint"></description>
+</groupbox>
