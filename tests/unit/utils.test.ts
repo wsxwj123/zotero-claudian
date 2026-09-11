@@ -40,10 +40,18 @@ test("join: 段内已带前导分隔符的后续段不叠加", () => {
 
 // ---- defaultWorkspacePath ----
 
-test("workspace: documentsDir 缺省时 darwin 回落 <home>/Documents", () => {
+test("workspace: darwin 默认 → <home>/zotero-claudian-workspace（避 TCC，2026-09-11 修订）", () => {
   assert.equal(
     defaultWorkspacePath("darwin", { home: "/Users/x" }),
-    "/Users/x/Documents/zotero-claudian-workspace",
+    "/Users/x/zotero-claudian-workspace",
+  );
+  // documentsDir 传入也不影响 darwin（不再经 Documents）
+  assert.equal(
+    defaultWorkspacePath("darwin", {
+      home: "/Users/x",
+      documentsDir: "/Users/x/Documents",
+    }),
+    "/Users/x/zotero-claudian-workspace",
   );
 });
 

@@ -57,7 +57,7 @@
 
 - 会话按文献条目自动分组；也支持不绑定文献的通用会话
 - 重启 Zotero 后会话仍在，直接续聊
-- 设置页可改**工作区目录**（AI 文件产出的落点，默认 `~/Documents/zotero-claudian-workspace`）
+- 设置页可改**工作区目录**（AI 文件产出的落点，默认 `~/zotero-claudian-workspace`）
 
 ## 数据与安全
 
@@ -89,7 +89,7 @@
 
 **会话存在哪？** Zotero 配置目录下 `claudian/`（插件自管）；会话正文同时存在于你本机 Claude Code 的会话目录中。删除插件内会话不会删除 Claude Code 的会话文件。
 
-**首次使用时弹出「Zotero 想访问文稿文件夹」？** 这是 macOS 的文件夹授权提示——AI 的工作区默认在 `~/Documents/zotero-claudian-workspace`，点「允许」即可；也可以在设置页把工作区改到其他位置（比如 `~/zotero-claudian-workspace`）避免该提示。
+**工作区目录可以放哪？** 默认 `~/zotero-claudian-workspace`（主目录下，不触发 macOS 文件夹授权）。若你手动把工作区改到 `~/Documents`、`~/Desktop`、`~/Downloads` 等受保护目录，macOS 会弹一次文件夹授权——拒绝后工作区将不可用（界面会明确报「工作区不可用」）。
 
 ## 开发
 

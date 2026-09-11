@@ -430,6 +430,10 @@ async function ensureWorkspace(): Promise<string> {
     if (!(await IOUtils.exists(path))) {
       await IOUtils.makeDirectory(path, { createAncestors: true });
     }
+    // 可访问性探测（2026-09-11 真实实测加固）：macOS TCC 拒绝后 exists 仍可能为 true、
+    // 但真实读写被系统拦——子进程会以 getcwd EPERM / "CLI 进程异常退出 (exit 1)" 形式失败，
+    // 远不如在此处显式报 WORKSPACE_UNAVAILABLE 清楚。getChildren 触发一次真实访问。
+    await IOUtils.getChildren(path);
     return path;
   } catch (err) {
     Zotero.logError(err as Error);

@@ -41,5 +41,6 @@ jobs:
       - name: Build XPI
         run: npm run build
 
-      - name: Dependency audit
-        run: npm audit --audit-level=high
+      - name: Dependency audit (production deps only)
+        # 审计随 XPI 分发的运行依赖；devDependencies（构建工具链）的漏洞不进产物、不阻塞构建
+        run: npm audit --omit=dev --audit-level=high

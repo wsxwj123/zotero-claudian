@@ -3,7 +3,7 @@
 //   joinPath(platform, ...segments) → PathUtils.join 的纯函数等价（宿主真实现走 PathUtils）：
 //     darwin 以 '/' 连接、win32 以 '\' 连接，连接处不产生双分隔符，绝对根保留。
 //   defaultWorkspacePath(platform, {home, documentsDir}) → §4.4 workspacePath 默认值：
-//     darwin：<home>/Documents/zotero-claudian-workspace（~ 已展开形态）；
+//     darwin：<home>/zotero-claudian-workspace（~ 已展开形态；2026-09-11 修订避 macOS TCC）；
 //     win32：<documentsDir>\zotero-claudian-workspace（documentsDir 由宿主经系统 API 注入，兼容 OneDrive 重定向）。
 // 另覆盖 §4.1.1（PDF path 行保留原生分隔符不转义）与 §4.1（--add-dir 原生路径单元素）。
 // 假设 A9（见 TEST-PLAN）：joinPath 为 PathUtils.join 的纯函数替身，语义按上注锁定。
@@ -57,10 +57,10 @@ test('join: darwin profile（~/Zotero 展开后）→ 同结构 / 形态', () =>
 
 // ---- defaultWorkspacePath（§4.4）----
 
-test('workspace: darwin 默认 → <home>/Documents/zotero-claudian-workspace', () => {
+test('workspace: darwin 默认 → <home>/zotero-claudian-workspace（避 TCC，2026-09-11 实测修订）', () => {
   assert.equal(
     defaultWorkspacePath('darwin', { home: '/Users/x', documentsDir: '/Users/x/Documents' }),
-    '/Users/x/Documents/zotero-claudian-workspace',
+    '/Users/x/zotero-claudian-workspace',
   );
 });
 

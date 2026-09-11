@@ -56,13 +56,18 @@ export interface WorkspacePathInput {
 
 /**
  * workspacePath 默认值（INTERFACE §4.4）：
- * darwin：<home>/Documents/zotero-claudian-workspace（~ 已展开形态）；
- * win32：<documentsDir>\zotero-claudian-workspace（documentsDir 优先，不回落 USERPROFILE）。
+ * darwin：<home>/zotero-claudian-workspace（~ 已展开形态；**2026-09-11 真实实测修订**——
+ *   原 <home>/Documents/… 在 macOS 触发 TCC「文稿文件夹」授权，用户拒绝后目录不可访问，
+ *   CLI 以 getcwd EPERM / exit 1 失败；home 根不在 TCC 保护面内，无授权弹窗）；
+ * win32：<documentsDir>\zotero-claudian-workspace（documentsDir 优先，不回落 USERPROFILE；Windows 无 TCC）。
  */
 export function defaultWorkspacePath(
   platform: Platform,
   input: WorkspacePathInput,
 ): string {
+  if (platform === "darwin") {
+    return joinPath(platform, input.home, WORKSPACE_DIR_NAME);
+  }
   const documents = input.documentsDir
     ? input.documentsDir
     : joinPath(platform, input.home, "Documents");
