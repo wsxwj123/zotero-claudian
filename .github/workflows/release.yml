@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v**
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  create-release:
+    # pin 到 commit SHA（供应链加固，安全审计建议 6）：2026-09-11 的 main
+    uses: zotero-plugin-dev/workflows/.github/workflows/release-plugin.yml@6bc4563f443313f6cebd3e425ba02f8929fb8d3f
+    # You can customize any of the inputs here.
+    # If you omit an input, its default value will be used.
+    with:
+      build: "npm run build"
+      release: "npm run release"
+    secrets: inherit
