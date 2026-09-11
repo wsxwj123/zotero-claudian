@@ -1,0 +1,1215 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- 安全兜底（重要 4）：本页是 chrome:// 特权页面，脚本只跑同源 bundle、样式全在页内、
+         页面自身不做任何网络 I/O（与宿主全靠 postMessage）。CSP 把「渲染产物带出远程请求」的
+         可能性按默认拒绝封死：本页不需要任何图片（markdown 渲染白名单也不含 img），故不设
+         img-src——回落到 default-src 'none'，连同源/data: 图片也一律拒绝。
+         与 markdown.ts 的消毒白名单互为第二道防线（一处在渲染层削元素，一处在文档层拒请求）。 -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; font-src 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1f2328;
+        --muted: #656d76;
+        --border: #d8dee4;
+        --accent: #0969da;
+        --user-bg: #ddf4ff;
+        --banner-bg: #fff1e5;
+        --banner-fg: #bc4c00;
+        --code-bg: #f6f8fa;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #15191e;
+          --fg: #e6ebf0;
+          --muted: #9198a1;
+          --border: #30363d;
+          --accent: #58a6ff;
+          --user-bg: #12324a;
+          --banner-bg: #3a2417;
+          --banner-fg: #ffa37d;
+          --code-bg: #22272e;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font:
+          13px/1.55 -apple-system,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      #app,
+      .app {
+        height: 100%;
+      }
+      .app {
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* 紧凑化（用户反馈「上下占用太大、中间能看见的太少」）：padding 6→3；
+         顶栏控件行 flex-wrap 折行 + 收缩（旧实现靠 overflow 硬裁：260px 下标题被压成 0 宽、
+         权限档被切在面板外） */
+      .header {
+        padding: 3px 10px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        flex: none;
+      }
+      /* 标题 / 指令 / 全页 / 权限档：一行放得下就一行，放不下折行，谁也不被裁掉 */
+      .header-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 2px 6px;
+        min-width: 0;
+      }
+      /* R4-3：用量/余额行（数据缺省时整行不渲染，见 App.ts UsageRow）。仍独立一行：
+         它文本长（本轮/缓存/累计/余额），并进标题行实测把 260px 面板挤成 3 行（80px > 42px） */
+      .usage {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        line-height: 1.35;
+        /* 窄面板优先压缩自己（各段省略号），不把别人挤没 */
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+      }
+      .usage-seg {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .usage-balance {
+        margin-left: auto;
+      }
+      .usage-refresh {
+        flex: none;
+        font: inherit;
+        font-size: 11px;
+        padding: 0 5px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: none;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .usage-refresh:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .header-title {
+        /* 折行判定看 flex-basis：整串标题(≈221px)会把右侧控件挤到第二行，
+           给一个折中基准宽（110px）→ 360px 起整排控件仍是一行；再窄才折行，
+           且 min-width 保证标题不会缩成 0 宽（旧实现 260px 下就是 w=0） */
+        flex: 1 1 110px;
+        min-width: 56px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* F6：顶栏权限档四档切换（PLAN §2 + R5），靠右贴边；窄面板可收缩（不裁到面板外） */
+      .perm-mode {
+        margin-left: auto;
+        flex: 0 1 auto;
+        min-width: 0;
+        /* 四档文案最长的「默认接受编辑计划放任」原生宽 ≈140px，会把 360px 面板的顶栏挤成三行：
+           封顶 120px（原生 select 截断显示，完整文案在悬停 title 与展开的下拉项里） */
+        max-width: 120px;
+        font: inherit;
+        font-size: 11px;
+        color: var(--muted);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1px 4px;
+        cursor: pointer;
+      }
+      .perm-mode:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      /* R5-B：放任档生效 = 红底警示；确认期提示行（第一次点只武装，第二次才生效） */
+      .perm-mode-danger {
+        color: #fff;
+        background: #b3261e;
+        border-color: #b3261e;
+        font-weight: 600;
+      }
+      .perm-confirm {
+        margin-left: auto;
+        flex: none;
+        font-size: 11px;
+        font-weight: 600;
+        color: #b3261e;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot.on {
+        background: #2da44e;
+      }
+      .dot.off {
+        background: var(--muted);
+      }
+
+      /* R7-K 起本容器装的是「工具行 + 四个分区」，得纵向排：M5 时代的横向 flex 会把
+         后面的分区一路推到面板右缘外面裁掉（用户实测「显示不全」），分行才看得见。 */
+      .sessions {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 2px;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border);
+        flex: none;
+        min-width: 0;
+        overflow-x: hidden;
+        /* 分区全展开时别把消息区挤没：与 .perms 同口径（45vh 上限 + 自身滚动） */
+        max-height: 45vh;
+        overflow-y: auto;
+      }
+      .session-select {
+        flex: 1;
+        min-width: 0;
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 3px 6px;
+      }
+      /* R10：会话区标题栏（收起态就这一行，展开态在最上面当「收起」开关）。
+         左标签可缩可省略（min-width:0 + ellipsis）：260px 也绝不横向溢出；
+         右「＋新建」不缩（flex:none），窄面板优先保按钮不保长文案。 */
+      .session-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .session-bar-toggle {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: left;
+        border: none;
+        background: none;
+        color: inherit;
+        font: inherit;
+        font-size: 11px;
+        padding: 0;
+        cursor: pointer;
+      }
+      .session-bar-toggle[data-open="1"] {
+        color: var(--muted);
+      }
+      /* 会话改名：输入框独占一行（.sessions 已纵向排，flex:1 在列向会让它按高度伸缩） */
+      .session-rename-input {
+        flex: none;
+        min-width: 0;
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 3px 6px;
+      }
+      .session-select:disabled,
+      .session-new:disabled,
+      .session-rename:disabled,
+      .session-del:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      .session-new,
+      .session-rename,
+      .session-del,
+      .banner-action {
+        flex: none;
+        font: inherit;
+        padding: 3px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: none;
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .session-del.confirm {
+        border-color: var(--banner-fg);
+        color: var(--banner-fg);
+      }
+      .banner-action {
+        border-color: currentColor;
+        color: inherit;
+      }
+
+      .banner {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 8px 12px;
+        background: var(--banner-bg);
+        color: var(--banner-fg);
+        border-bottom: 1px solid var(--border);
+        white-space: pre-wrap;
+        word-break: break-word;
+        flex: none;
+      }
+      .banner-text {
+        flex: 1;
+      }
+      .banner-close {
+        background: none;
+        border: none;
+        color: inherit;
+        cursor: pointer;
+        font-size: 15px;
+        line-height: 1;
+        padding: 0 2px;
+      }
+
+      .messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+        /* 选段浮动按钮（.sel-save）的定位上下文：absolute 相对本容器的内容坐标系 */
+        position: relative;
+      }
+      .empty {
+        color: var(--muted);
+        text-align: center;
+        margin-top: 40px;
+      }
+
+      .msg {
+        margin-bottom: 14px;
+      }
+      /* 紧凑化：正文独占一行（flex-basis 100%），操作条 + 存笔记并排在同一行 ——
+         原来两条各占一行（20.6 + 24.6px），现在只花一行 */
+      .msg.user,
+      .msg.assistant {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .msg-body {
+        flex: 1 1 100%;
+        min-width: 0;
+      }
+      .msg.user {
+        background: var(--user-bg);
+        border-radius: 8px;
+        padding: 8px 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin-left: 48px;
+      }
+
+      .md > :first-child {
+        margin-top: 0;
+      }
+      .md > :last-child {
+        margin-bottom: 0;
+      }
+      .md p {
+        margin: 0.4em 0;
+      }
+      .md a {
+        color: var(--accent);
+      }
+      .md pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        overflow-x: auto;
+        font-size: 12px;
+      }
+      .md code {
+        background: var(--code-bg);
+        border-radius: 4px;
+        padding: 1px 4px;
+        font-size: 12px;
+      }
+      .md pre code {
+        background: none;
+        padding: 0;
+      }
+      /* R8：AI 回复里超 20 行的代码块折起（原生 details —— 展开/收起/键盘可达由浏览器给，
+         折叠态是 DOM 视图态，重画/切会话即复位；头部一行 = 语言 · 展开代码（N 行）/ 收起） */
+      .code-fold {
+        margin: 0.6em 0;
+      }
+      .code-fold > summary {
+        cursor: pointer;
+        user-select: none;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .code-fold > summary .code-lang::after {
+        content: " · ";
+      }
+      .code-fold[open] .code-fold-open,
+      .code-fold:not([open]) .code-fold-close {
+        display: none;
+      }
+      .code-fold > pre {
+        margin: 6px 0 2px;
+      }
+      .md table {
+        border-collapse: collapse;
+        margin: 0.6em 0;
+      }
+      .md th,
+      .md td {
+        border: 1px solid var(--border);
+        padding: 4px 10px;
+      }
+      .md blockquote {
+        border-left: 3px solid var(--border);
+        margin: 0.6em 0;
+        padding: 0 10px;
+        color: var(--muted);
+      }
+      /* AI 原生 SVG 与 mermaid 渲染图：超宽时横向滚动，不撑破消息流 */
+      .md-svg,
+      .mermaid-rendered {
+        margin: 0.6em 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+      .md-svg > svg,
+      .mermaid-rendered > svg {
+        max-width: 100%;
+        height: auto;
+      }
+      .mermaid-rendered > svg {
+        display: block;
+        margin: 0 auto;
+      }
+
+      .msg-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        margin-top: 2px; /* 与 .msg-tools 同高：两组在父级 flex 行里对齐 */
+        flex: 0 1 auto;
+        min-width: 0;
+      }
+      /* 笔记选项面板（创建新笔记 / 追加到《…》/ 取消）自带一行，不和操作条挤一块 */
+      .msg-actions .note-picker {
+        flex-basis: 100%;
+      }
+      .note-opt,
+      .note-cancel {
+        font: inherit;
+        font-size: 12px;
+        padding: 2px 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: none;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .note-opt:hover,
+      .note-cancel:hover {
+        color: var(--fg);
+        border-color: var(--accent);
+      }
+      /* 选段浮动按钮：定位由 JS 给 left/top（内容坐标系），尺寸估算见 MessageList.SEL_BTN_* */
+      .sel-save {
+        position: absolute;
+        z-index: 5;
+        font: inherit;
+        font-size: 12px;
+        padding: 2px 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--fg);
+        box-shadow: 0 1px 5px rgba(0, 0, 0, 0.2);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .sel-save:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      /* 选段浮钮点完就地展开的选项面板（创建新笔记 / 追加到《…》 / 取消）：
+         位置与 .sel-save 同一套内容坐标系，宽度上限由 JS 给（见 SEL_PANEL_W） */
+      .sel-note-panel {
+        position: absolute;
+        z-index: 5;
+      }
+      .sel-note-panel .note-picker {
+        background: var(--bg);
+        box-shadow: 0 1px 5px rgba(0, 0, 0, 0.2);
+      }
+      .note-picker {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 6px;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        max-width: 100%;
+      }
+      .note-opt {
+        max-width: 260px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .note-hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .streaming::after {
+        content: "▍";
+        animation: blink 1s steps(2) infinite;
+        color: var(--muted);
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      details.thinking,
+      details.tool {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin: 6px 0;
+        padding: 4px 10px;
+        background: var(--code-bg);
+      }
+      details.thinking summary,
+      details.tool summary {
+        cursor: pointer;
+        color: var(--muted);
+        user-select: none;
+        font-size: 12px;
+      }
+      .thinking-body {
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--muted);
+        padding: 6px 2px;
+      }
+      pre.tool-input,
+      pre.tool-result {
+        margin: 6px 0 2px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        overflow-x: auto;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      pre.tool-result.error {
+        color: var(--banner-fg);
+        border-color: var(--banner-fg);
+      }
+
+      .perms {
+        flex: none;
+        max-height: 45vh;
+        overflow-y: auto;
+        border-top: 1px solid var(--border);
+      }
+      .perm {
+        border-bottom: 1px solid var(--border);
+        background: var(--banner-bg);
+        color: var(--banner-fg);
+        padding: 8px 12px;
+      }
+      .perm-head {
+        font-size: 12px;
+      }
+      pre.perm-summary {
+        margin: 6px 0;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--bg);
+        color: var(--fg);
+        font-size: 12px;
+        max-height: 180px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      details.perm-raw summary {
+        cursor: pointer;
+        font-size: 12px;
+        user-select: none;
+      }
+      details.perm-raw pre {
+        margin: 4px 0 0;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--code-bg);
+        color: var(--fg);
+        font-size: 12px;
+        max-height: 200px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .perm-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .perm-actions button {
+        font: inherit;
+        padding: 4px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .perm-allow,
+      .perm-remember {
+        border-color: currentColor;
+      }
+      .perm-deny {
+        color: var(--banner-fg);
+        border-color: currentColor;
+      }
+
+      .status {
+        flex: none;
+        padding: 1px 10px;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+        font-size: 11px;
+        line-height: 1.35;
+        /* 长文案（等待 CLI 的第 N 秒）不折行撑高：省略号 + 悬停看全文 */
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .input-row {
+        flex: none;
+        display: flex;
+        gap: 6px;
+        padding: 2px 10px 6px;
+        align-items: flex-end;
+      }
+      .input {
+        flex: 1;
+        min-width: 0;
+        resize: none;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 8px;
+        font: inherit;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .input:focus {
+        outline: 1px solid var(--accent);
+        border-color: transparent;
+      }
+      .input:disabled {
+        opacity: 0.6;
+      }
+      .send,
+      .interrupt {
+        border: none;
+        border-radius: 6px;
+        padding: 6px 14px;
+        cursor: pointer;
+        font: inherit;
+        flex: none;
+      }
+      .send {
+        background: var(--accent);
+        color: #fff;
+      }
+      .send:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .interrupt {
+        background: none;
+        border: 1px solid var(--border);
+        color: var(--fg);
+      }
+      .interrupt:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      /* R7-A：顶栏「指令」按钮（紧凑：高度压到与权限档一致） */
+      .header-btn {
+        flex: none;
+        border: 1px solid var(--border);
+        background: none;
+        color: var(--fg);
+        border-radius: 6px;
+        padding: 1px 6px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+      }
+      .header-btn:hover {
+        background: var(--code-bg);
+      }
+
+      /* R7-B：@ 提及（chips 在上、检索面板贴输入框上方） */
+      .input-wrap {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        padding: 5px 10px 0;
+        min-width: 0;
+      }
+      /* 工具行（＋范围 / 📎附件）：**恒一行**（nowrap）——用户反馈原来两个按钮竖着排。
+         窄面板由容器查询把文字藏掉只留图标；范围 chip 可收缩 + 省略号，绝不换行。
+         判定用 CSS 容器查询（而非 JS 量宽度 + 挂属性）：
+           · 零 JS、零重渲染、无「改完宽度下一帧才生效」的滞后；
+           · 真实目标是 Zotero 7+（本机真机为 Zotero 9/10，Gecko ≥115），
+             `@container` 自 Firefox 110 起支持，够用；
+           · 兜底：万一跑到更老的引擎（规则整块被丢弃）→ 文字保留、只显示图标不生效，
+             但 nowrap + chip 收缩 + 省略号仍在，**不会溢出更不会裁掉控件**（用户原始投诉）。 */
+      .tool-row {
+        flex-wrap: nowrap;
+        gap: 4px;
+        padding: 3px 10px 0;
+        container-type: inline-size;
+      }
+      @container (max-width: 320px) {
+        .btn-label {
+          display: none;
+        }
+      }
+      .tool-row > .chip {
+        flex: 0 1 auto;
+        min-width: 0;
+      }
+      .tool-row > .btn-icon-text {
+        flex: none;
+      }
+      /* 图标 + 文字：图标与文字之间不留多余空隙 */
+      .btn-icon-text {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        line-height: 1;
+      }
+      .icon {
+        display: block;
+        flex: none;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        max-width: 100%;
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 4px 1px 10px;
+        font-size: 12px;
+      }
+      .chip-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 220px;
+      }
+      .chip-x {
+        border: none;
+        background: none;
+        color: var(--muted);
+        cursor: pointer;
+        font: inherit;
+        padding: 0 2px;
+      }
+      .chip-missing {
+        border-color: var(--banner-fg);
+        color: var(--banner-fg);
+      }
+      .chip-notice {
+        font-size: 12px;
+        color: var(--banner-fg);
+      }
+      /* R7-J：附件 chips（图标 + 文件名 + 大小 + 删除）与「选择文件」入口 */
+      .chip-attach .chip-icon {
+        font-size: 11px;
+      }
+      .chip-attach .chip-size {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .attach-btn {
+        border: 1px dashed var(--border);
+        background: none;
+        color: var(--muted);
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .attach-btn:hover {
+        color: inherit;
+      }
+      .attach-input {
+        display: none;
+      }
+      .msg-attachments {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      /* R7-K：会话列表四区（置顶 / 当前文献 / 抽屉分组 / 归档）+ 搜索 */
+      /* 自身仍是横向一行（搜索框 + 改名/新建/删除），内缩交给 .sessions 的 padding */
+      .session-toolbar {
+        display: flex;
+        gap: 6px;
+        padding: 0;
+        align-items: center;
+      }
+      .session-search {
+        flex: 1 1 auto;
+        min-width: 0;
+        background: var(--bg);
+        color: inherit;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-size: 12px;
+      }
+      /* 内缩交给 .sessions（容器 padding 12px）：各分区只管纵向间距 */
+      .session-section,
+      .session-drawer,
+      .session-archive {
+        padding: 4px 0 0;
+        min-width: 0;
+      }
+      .session-section-title,
+      .session-group-title {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 4px 0 2px;
+      }
+      .session-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 0;
+      }
+      .session-row.active .session-label {
+        font-weight: 600;
+      }
+      .session-indent {
+        color: var(--muted);
+        white-space: pre;
+        font-size: 11px;
+      }
+      .session-label {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: left;
+        border: none;
+        background: none;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
+      /* 行内右侧的时间戳/占位一律不参与伸缩、不换行：否则标签会被时间挤没（R7-K 复查） */
+      .session-time,
+      .session-hint {
+        flex: none;
+        white-space: nowrap;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .session-branch-toggle,
+      .session-pin,
+      .session-drawer-toggle,
+      .session-archive-toggle {
+        border: none;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+        padding: 0 2px;
+      }
+      .session-drawer-toggle,
+      .session-archive-toggle {
+        text-align: left;
+        font-size: 12px;
+      }
+      .session-pin.on {
+        color: #d9a300;
+      }
+      .session-hint {
+        padding: 4px 0;
+      }
+      .mention-panel {
+        max-height: 200px;
+        overflow-y: auto;
+        border-top: 1px solid var(--border);
+        background: var(--bg);
+      }
+      .mention-item {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 4px 12px;
+        cursor: pointer;
+      }
+      .mention-item.active,
+      .mention-item:hover {
+        background: var(--user-bg);
+      }
+      .mention-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .mention-meta {
+        flex: none;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .mention-empty {
+        padding: 6px 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      /* R7-C：命令面板（沿用 mention-panel 的形态；本地/项目/用户来源打标） */
+      .command-tag {
+        margin-left: 6px;
+        padding: 0 4px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      /* R7-D：范围 chip 与「+ 范围 / 📎 附件」（同一行工具条，见 .tool-row） */
+      .scope-btn-add {
+        border: 1px dashed var(--border);
+        background: none;
+        color: var(--muted);
+        border-radius: 999px;
+        padding: 1px 8px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .scope-btn-add:hover {
+        color: inherit;
+        border-style: solid;
+      }
+      .chip-scope {
+        border-color: var(--dot-on, var(--border));
+      }
+      .scope-picker {
+        display: inline-flex;
+        gap: 4px;
+      }
+      .scope-opt {
+        border: 1px solid var(--border);
+        background: var(--code-bg);
+        color: inherit;
+        border-radius: 6px;
+        padding: 1px 8px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      /* R7-F：消息级操作（复制 / 编辑 / 展开收起；hover 出现，无 hover 常显） */
+      .msg-body.collapsed {
+        max-height: 260px;
+        overflow: hidden;
+        mask-image: linear-gradient(to bottom, #000 70%, transparent);
+        -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+      }
+      /* R7-F + 紧凑化：消息操作条（复制 / 编辑 / 分支 / 存笔记）——图标按钮，
+         默认**极淡**（.45），行 hover 或按钮 focus 时变清晰；不占额外高度（与操作条同一行） */
+      .msg-tools {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        margin-top: 2px;
+        flex: none;
+        opacity: 0.45;
+        transition: opacity 0.12s ease-in;
+      }
+      .msg:hover .msg-tools,
+      .msg-tools:focus-within {
+        opacity: 1;
+      }
+      /* 无 hover 场景（触屏/键盘）：常显，别让操作入口藏没了 */
+      @media (hover: none) {
+        .msg-tools {
+          opacity: 1;
+        }
+      }
+      .msg-tool {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: none;
+        color: var(--muted);
+        border-radius: 4px;
+        padding: 1px 3px;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .msg-tool:hover:not(:disabled) {
+        color: var(--fg);
+        background: var(--code-bg);
+      }
+      .msg-tool:focus-visible {
+        outline: 1px solid var(--accent);
+        outline-offset: 1px;
+        color: var(--fg);
+      }
+      .msg-tool:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .msg-tool.on {
+        color: var(--accent);
+      }
+      .msg.divider {
+        align-self: center;
+        color: var(--muted);
+        font-size: 12px;
+        border-top: 1px dashed var(--border);
+        padding-top: 4px;
+        margin: 6px 12px;
+      }
+
+      /* R7-C：/help 帮助弹层 */
+      .help-list {
+        padding: 4px 0;
+      }
+      .help-row {
+        display: flex;
+        gap: 8px;
+        padding: 2px 0;
+        font-size: 12px;
+      }
+      .help-name {
+        flex: none;
+        min-width: 110px;
+        font-family: var(--mono, monospace);
+      }
+      .help-desc {
+        color: var(--muted);
+      }
+
+      /* R7-A：指令编辑器弹层（面板内，不新开窗口） */
+      .overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px;
+        background: rgba(0, 0, 0, 0.35);
+      }
+      .overlay-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 100%;
+        max-width: 560px;
+        max-height: 100%;
+        padding: 12px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      .overlay-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .overlay-title {
+        font-weight: 600;
+      }
+      .overlay-close {
+        border: none;
+        background: none;
+        color: var(--muted);
+        font-size: 16px;
+        cursor: pointer;
+      }
+      .overlay-scopes {
+        display: flex;
+        gap: 6px;
+      }
+      .scope-btn {
+        border: 1px solid var(--border);
+        background: none;
+        color: var(--fg);
+        border-radius: 6px;
+        padding: 2px 8px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+      }
+      .scope-btn.on {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .scope-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .overlay-path {
+        font-size: 12px;
+        color: var(--muted);
+        word-break: break-all;
+        user-select: text;
+      }
+      .overlay-hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .overlay-notice {
+        font-size: 12px;
+        color: var(--banner-fg);
+      }
+      .overlay-text {
+        flex: 1;
+        min-height: 200px;
+        resize: vertical;
+        padding: 8px;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font:
+          12px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+      .overlay-foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      /* R9：/diag 诊断报告弹层（原文可选中复制；长行折行，不撑破卡片） */
+      .diag-text {
+        margin: 0;
+        overflow: auto;
+        max-height: 60vh;
+        white-space: pre-wrap;
+        word-break: break-all;
+        user-select: text;
+      }
+      .overlay-state {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .overlay-state.error {
+        color: var(--banner-fg);
+      }
+      .overlay-state.saved {
+        color: var(--accent);
+      }
+      .overlay-count {
+        flex: none;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .overlay-count.over {
+        color: var(--banner-fg);
+        font-weight: 600;
+      }
+      .overlay-save,
+      .overlay-cancel {
+        flex: none;
+        border: none;
+        border-radius: 6px;
+        padding: 4px 12px;
+        cursor: pointer;
+        font: inherit;
+      }
+      .overlay-save {
+        background: var(--accent);
+        color: #fff;
+      }
+      .overlay-save:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .overlay-cancel {
+        background: none;
+        border: 1px solid var(--border);
+        color: var(--fg);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="./chat.js"></script>
+  </body>
+</html>
