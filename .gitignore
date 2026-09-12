@@ -1,0 +1,21 @@
+node_modules/
+*.xpi
+.DS_Store
+.scratch/
+
+# Node.js
+pnpm-lock.yaml
+yarn.lock
+
+# TSC
+tsconfig.tsbuildinfo
+
+# Scaffold
+.env
+.scaffold
+build
+logs
+addon/content/chat/
+
+# 工具本地状态
+.workbuddy/
