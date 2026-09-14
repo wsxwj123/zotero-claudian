@@ -102,9 +102,7 @@ test("余额：响应无 balance_infos 字段 → 失败", () => {
 });
 
 test("余额：balance_infos 不是数组 → 失败不抛", () => {
-  const r = parseBalance(
-    JSON.stringify({ balance_infos: "junk" }),
-  );
+  const r = parseBalance(JSON.stringify({ balance_infos: "junk" }));
   assert.equal(r.ok, false);
 });
 
@@ -117,7 +115,13 @@ test("余额：首条缺 total_balance → 失败（没有可显示的数字）"
 });
 
 test("余额：畸形 JSON（截断/纯文本/空串）→ 失败不抛", () => {
-  for (const body of ['{"balance_infos":[', "not json", "", "   ", "<html>502</html>"]) {
+  for (const body of [
+    '{"balance_infos":[',
+    "not json",
+    "",
+    "   ",
+    "<html>502</html>",
+  ]) {
     let r: any;
     assert.doesNotThrow(() => {
       r = parseBalance(body);
@@ -173,7 +177,10 @@ test("provider：baseUrl 含 deepseek → 'deepseek'", () => {
 
 test("provider：model 含 deepseek（baseUrl 缺失）→ 'deepseek'", () => {
   assert.equal(detectProvider({ model: "deepseek-chat" }), "deepseek");
-  assert.equal(detectProvider({ baseUrl: null, model: "deepseek-chat" }), "deepseek");
+  assert.equal(
+    detectProvider({ baseUrl: null, model: "deepseek-chat" }),
+    "deepseek",
+  );
 });
 
 test("provider：大小写不敏感（DeepSeek / DEEPSEEK）", () => {

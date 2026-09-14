@@ -719,7 +719,9 @@ test("detect: buildCliInvocation cmd 通道组装失败（参数含 %）→ ok:f
 // ---- darwin sh 提限通道（真实实测 2026-09-11：launchd 继承低 fd limit → CLI 启动即 exit 1）----
 
 test("detect: buildCliInvocation sh 通道 → /bin/sh -c 提限脚本 + $0 位 claude 路径", () => {
-  const r = buildCliInvocation("sh", "/Users/x/.local/bin/claude", ["--version"]);
+  const r = buildCliInvocation("sh", "/Users/x/.local/bin/claude", [
+    "--version",
+  ]);
   assert.ok(r.ok);
   assert.equal(r.file, "/bin/sh");
   // ["-c", script, $0=claude 路径, ...原参数]
@@ -729,7 +731,11 @@ test("detect: buildCliInvocation sh 通道 → /bin/sh -c 提限脚本 + $0 位 
     r.args[1],
     'ulimit -n 2147483646 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true; exec "$0" "$@"',
   );
-  assert.equal(r.args[2], "/Users/x/.local/bin/claude", "claude 路径必须落 $0 位");
+  assert.equal(
+    r.args[2],
+    "/Users/x/.local/bin/claude",
+    "claude 路径必须落 $0 位",
+  );
 });
 
 test("detect: sh 通道生产形态 → 原参数逐元素跟在 $0 之后（不经字符串拼接）", () => {
@@ -750,7 +756,13 @@ test("detect: sh 通道生产形态 → 原参数逐元素跟在 $0 之后（不
 
 test("detect: sh 通道特殊字符参数独立成元素、不被拒绝（argv 直传，无 cmd 的字符门）", () => {
   // 空格 / 引号 / 百分号 / 换行都只在独立 argv 元素里，永远不进 shell 解析面
-  const nasty = ["--add-dir", "/Users/x/My Papers", 'Bash(python *)', "%Z%", "it's\nx"];
+  const nasty = [
+    "--add-dir",
+    "/Users/x/My Papers",
+    "Bash(python *)",
+    "%Z%",
+    "it's\nx",
+  ];
   const r = buildCliInvocation("sh", "/b/claude", nasty);
   assert.ok(r.ok);
   assert.deepEqual(r.args.slice(2), ["/b/claude", ...nasty]);
@@ -773,12 +785,7 @@ test(
     // 那是比真实 launchd 环境更苛刻的假象，硬限在真实场景是 unlimited），再跑被测包装；假 claude 打印自身 limit/argv
     const out = spawnSync(
       "/bin/sh",
-      [
-        "-c",
-        'ulimit -S -n 256 2>/dev/null; exec "$0" "$@"',
-        r.file,
-        ...r.args,
-      ],
+      ["-c", 'ulimit -S -n 256 2>/dev/null; exec "$0" "$@"', r.file, ...r.args],
       { encoding: "utf8" },
     );
     assert.equal(out.status, 0, String(out.stderr));

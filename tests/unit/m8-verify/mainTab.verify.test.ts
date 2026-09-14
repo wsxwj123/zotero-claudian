@@ -46,7 +46,11 @@ class FakePane {
   collapsed: boolean;
   renderCalls = 0;
   clickCalls = 0;
+  /** 真机形态：section 元素也带 data-pane（R8 起按它匹配，不再按标签名单取） */
   private readonly section = {
+    getAttribute: (name: string) =>
+      name === "data-pane" ? FakePane.PANE_ID_ESCAPED : null,
+    hidden: false,
     render: () => {
       this.renderCalls += 1;
       return undefined;
@@ -74,7 +78,9 @@ class FakePane {
   }
 
   querySelectorAll(selector: string): unknown[] {
-    return selector === ".btn[data-pane]" ? [this.button] : [];
+    if (selector === ".btn[data-pane]") return [this.button];
+    if (selector === "item-pane-custom-section") return [this.section];
+    return [];
   }
 
   querySelector(selector: string): unknown {

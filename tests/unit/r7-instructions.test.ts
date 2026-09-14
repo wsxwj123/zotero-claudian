@@ -82,7 +82,11 @@ function assertRefused(
   res: ReturnType<typeof resolveInstructionsPath>,
   label: string,
 ): void {
-  assert.equal(res.ok, false, `${label}：应当拒绝，实际 ${JSON.stringify(res)}`);
+  assert.equal(
+    res.ok,
+    false,
+    `${label}：应当拒绝，实际 ${JSON.stringify(res)}`,
+  );
   if (!res.ok) {
     assert.equal(typeof res.error, "string", `${label}：error 必须是字符串`);
     assert.ok(res.error.length > 0, `${label}：拒绝必须带说明原文`);
@@ -266,7 +270,10 @@ test("R7-A 读：读取失败（EACCES）→ 返回 error 且 text 为空串，�
     collectionDir: null,
     fs,
   });
-  assert.ok(res.error && res.error.includes("EACCES"), `错误原文要带出来：${res.error}`);
+  assert.ok(
+    res.error && res.error.includes("EACCES"),
+    `错误原文要带出来：${res.error}`,
+  );
   assert.equal(res.text, "");
   assert.equal(res.exists, false, "读不到就当没有——UI 不能显示半截状态");
 });
@@ -374,9 +381,16 @@ test("R7-A 写：恰好 20000 字符 → 允许（上限内边界）", async () 
     text,
     fs,
   });
-  assert.equal(INSTRUCTIONS_MAX_CHARS, 20000, "上限口径 20 000 字符（PLAN §2）");
+  assert.equal(
+    INSTRUCTIONS_MAX_CHARS,
+    20000,
+    "上限口径 20 000 字符（PLAN §2）",
+  );
   assert.equal(res.ok, true);
-  assert.equal((fs.files.get(GLOBAL_PATH) as string).length, INSTRUCTIONS_MAX_CHARS);
+  assert.equal(
+    (fs.files.get(GLOBAL_PATH) as string).length,
+    INSTRUCTIONS_MAX_CHARS,
+  );
 });
 
 test("R7-A 写：20001 字符 → 拒绝且**不落盘**（防手滑粘贴整篇论文）", async () => {

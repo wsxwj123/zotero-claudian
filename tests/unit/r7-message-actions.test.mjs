@@ -63,7 +63,11 @@ test("R7-F 复制态：定时器到点（token 匹配）→ 回落 idle", () => 
 test("R7-F 复制态：连点 —— 仍为 copied（不早退）且 token 递增", () => {
   const s1 = messageCopyClick(initialMessageActionState());
   const s2 = messageCopyClick(s1);
-  assert.equal(s2.copy.status, "copied", "第二次点击不得把「已复制」吞掉（要重新计时）");
+  assert.equal(
+    s2.copy.status,
+    "copied",
+    "第二次点击不得把「已复制」吞掉（要重新计时）",
+  );
   assert.notEqual(s2.copy.token, s1.copy.token, "第二次点击要换新 token");
 });
 
@@ -71,7 +75,11 @@ test("R7-F 复制态：连点后旧定时器作废（用旧 token 回落无效�
   const s1 = messageCopyClick(initialMessageActionState());
   const s2 = messageCopyClick(s1);
   const stale = messageCopyRevert(s2, s1.copy.token);
-  assert.equal(stale.copy.status, "copied", "旧定时器不得把新一次的「已复制」提前清掉");
+  assert.equal(
+    stale.copy.status,
+    "copied",
+    "旧定时器不得把新一次的「已复制」提前清掉",
+  );
   const fresh = messageCopyRevert(stale, s2.copy.token);
   assert.equal(fresh.copy.status, "idle", "最新 token 到点才回落");
 });
@@ -94,14 +102,22 @@ test("R7-F 复制内容：AI 回复复制的是 Markdown 源码（**粗体** / `
   const src = "这是**粗体**与 `行内代码`：\n\n```js\nconst a = 1;\n```\n";
   const copied = copyTurnText(ai(src));
   assert.equal(copied, src, "必须逐字是 Markdown 源码");
-  assert.ok(!copied.includes("<strong>") && !copied.includes("<pre>"), "不得是渲染后的 HTML");
+  assert.ok(
+    !copied.includes("<strong>") && !copied.includes("<pre>"),
+    "不得是渲染后的 HTML",
+  );
 });
 
 test("R7-F 复制内容：多条 text 块按序拼接；思考块与工具卡不进复制内容", () => {
   const turn = {
     role: "assistant",
     blocks: [
-      { blockType: "thinking", index: 0, text: "内部思考不该被复制", streaming: false },
+      {
+        blockType: "thinking",
+        index: 0,
+        text: "内部思考不该被复制",
+        streaming: false,
+      },
       { blockType: "text", index: 1, text: "第一段。", streaming: false },
       {
         blockType: "tool",
@@ -127,7 +143,13 @@ test("R7-F 复制内容：用户消息复制原文（纯文本，不渲染）", 
 });
 
 test("R7-F 复制内容：空/异常输入 → 空串，不抛", () => {
-  for (const bad of [undefined, null, {}, { role: "assistant" }, { role: "user" }]) {
+  for (const bad of [
+    undefined,
+    null,
+    {},
+    { role: "assistant" },
+    { role: "user" },
+  ]) {
     let got;
     assert.doesNotThrow(() => {
       got = copyTurnText(bad);
@@ -181,7 +203,10 @@ test("R7-F 剪贴板：两条都失败 → 返回 false + 记日志，**不抛**
     });
   });
   assert.equal(ok, false);
-  assert.ok(logs.length > 0, "失败必须留日志（契约要求两条路径都有兜底 + 日志）");
+  assert.ok(
+    logs.length > 0,
+    "失败必须留日志（契约要求两条路径都有兜底 + 日志）",
+  );
 });
 
 test("R7-F 剪贴板：execCommand 抛错也不外泄（回落路径同样兜底）", async () => {
@@ -207,7 +232,10 @@ const LONG = Array.from({ length: 13 }, (_, i) => `第 ${i + 1} 行`).join("\n")
 test("R7-F 折叠：超阈值（> 12 行）默认折叠；正好 12 行不折叠", () => {
   assert.equal(COLLAPSE_LINE_THRESHOLD, 12);
   assert.equal(isOverflowing(LONG), true);
-  assert.equal(isOverflowing(Array.from({ length: 12 }, () => "行").join("\n")), false);
+  assert.equal(
+    isOverflowing(Array.from({ length: 12 }, () => "行").join("\n")),
+    false,
+  );
   const s = initialMessageActionState();
   assert.equal(messageCollapsed(s, 3, LONG), true, "超长消息默认折叠");
   assert.equal(messageCollapsed(s, 3, "短消息"), false);
@@ -272,7 +300,11 @@ test("R7-F 编辑：AI 消息没有编辑入口（只有复制）", () => {
 });
 
 test("R7-F 编辑：非法下标 / 空数组 → 不抛、不置编辑态", () => {
-  for (const [msgs, idx] of [[MESSAGES, 99], [MESSAGES, -1], [[], 0]]) {
+  for (const [msgs, idx] of [
+    [MESSAGES, 99],
+    [MESSAGES, -1],
+    [[], 0],
+  ]) {
     let out;
     assert.doesNotThrow(() => {
       out = messageEditStart(initialMessageActionState(), msgs, idx);

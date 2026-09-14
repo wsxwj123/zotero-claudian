@@ -75,7 +75,10 @@ test("buildSpawnArgs: addDir 空串 = 不带 --add-dir", () => {
 test("buildSpawnArgs: resume 值原样透传（不转义——argv 数组直传，转义仅在 cmd.exe 通道）", () => {
   // R12 契约变更（安全复查）：id 进 argv 前过 utils/ids 白名单，故样例改为合法形态；
   // 原先用 "a b&c" 只为证明"不转义"，而带空格/& 的形态现在**根本进不来**（见下一条）
-  const args = buildSpawnArgs({ ...BASE, resumeClaudeSessionId: "abc-123_DEF" });
+  const args = buildSpawnArgs({
+    ...BASE,
+    resumeClaudeSessionId: "abc-123_DEF",
+  });
   assert.equal(args[args.indexOf("--resume") + 1], "abc-123_DEF");
 });
 

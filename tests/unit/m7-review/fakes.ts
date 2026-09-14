@@ -64,6 +64,9 @@ export interface FakeNoteItem {
   setNote(h: string): void;
   saveTx(): Promise<void>;
   getNoteTitle(): string;
+  /** R6 起 notes.ts 靠这两个判条目类型（真机 Zotero.Item 同名方法） */
+  isRegularItem(): boolean;
+  isAttachment(): boolean;
 }
 
 export interface FakeRegularItem {
@@ -75,6 +78,8 @@ export interface FakeRegularItem {
   children: number[];
   failGetNotes: Error | null;
   getNotes(): number[];
+  isRegularItem(): boolean;
+  isAttachment(): boolean;
 }
 
 export interface FakeZoteroWorld {
@@ -130,6 +135,8 @@ export function installFakeZotero(): FakeZoteroWorld {
         if (it.failGetNotes) throw it.failGetNotes;
         return [...it.children];
       },
+      isRegularItem: () => true,
+      isAttachment: () => false,
     };
     register(it);
     return it;
@@ -169,6 +176,8 @@ export function installFakeZotero(): FakeZoteroWorld {
       getNoteTitle(): string {
         return it.title;
       },
+      isRegularItem: () => false,
+      isAttachment: () => false,
     } as unknown as FakeNoteItem;
     notes.push(it);
     register(it);
@@ -217,6 +226,12 @@ export function installFakeZotero(): FakeZoteroWorld {
     }
     getNoteTitle(): string {
       return this.title;
+    }
+    isRegularItem(): boolean {
+      return false;
+    }
+    isAttachment(): boolean {
+      return false;
     }
   }
 

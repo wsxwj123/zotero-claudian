@@ -66,7 +66,8 @@ function scopeResolved(kind, count, label) {
   return {
     type: "scopeResolved",
     kind,
-    label: label ?? (kind === "collection" ? "科学前言" : SCOPE_SELECTION_LABEL),
+    label:
+      label ?? (kind === "collection" ? "科学前言" : SCOPE_SELECTION_LABEL),
     items: Array.from({ length: count }, (_, i) => ({
       itemKey: `K${i}`,
       title: `题名 ${i}`,
@@ -158,7 +159,11 @@ test("R12-D：刷新入口只给 selection chip；collection chip 没有", () =>
   other.pick("collection");
   other.receipt(scopeResolved("collection", 2, "科学前言"));
   assert.equal(other.state().scope.chip.kind, "collection");
-  assert.equal(scopeRefreshable(other.state().scope), false, "分类 chip 不给 ↻");
+  assert.equal(
+    scopeRefreshable(other.state().scope),
+    false,
+    "分类 chip 不给 ↻",
+  );
   assert.equal(refreshScope(other.state()), null, "分类 chip 点不出请求");
 });
 

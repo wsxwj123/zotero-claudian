@@ -20,7 +20,10 @@ import {
   type TurnPromptInput,
 } from "../../src/modules/hostBridge.ts";
 import type { HostMessage } from "../../src/chat/lib/types.ts";
-import type { SpawnTurnOptions, TurnHandle } from "../../src/modules/cliRunner.ts";
+import type {
+  SpawnTurnOptions,
+  TurnHandle,
+} from "../../src/modules/cliRunner.ts";
 import type { AttachmentInput } from "../../src/utils/attachments.ts";
 import { saveAttachments } from "../../src/utils/attachments.ts";
 import { makeStore } from "./helpers/memoryFs.ts";
@@ -171,7 +174,10 @@ test("安全修：选择器回执只有 {token,name,sizeBytes}——没有路径
     { path: "/tmp/选择/图.png", name: "图.png", sizeBytes: 1024 },
     { path: "/tmp/选择/图.png", name: "图.png", sizeBytes: 1024 }, // 同一个文件选两次
   );
-  bridge.dispatch({ source: win, data: { type: "pickAttachments", multiple: true } });
+  bridge.dispatch({
+    source: win,
+    data: { type: "pickAttachments", multiple: true },
+  });
   await settle();
   const reply = lastOf(sent, "attachmentsPicked");
   assert.ok(reply && reply.type === "attachmentsPicked");
@@ -183,9 +189,17 @@ test("安全修：选择器回执只有 {token,name,sizeBytes}——没有路径
       "回执字段只能是 token/name/sizeBytes",
     );
     assert.equal((f as { path?: unknown }).path, undefined, "回执不许带路径");
-    assert.match(f.token, /^[0-9a-f]{32}$/, "token 是 16 字节 CSPRNG 的十六进制");
+    assert.match(
+      f.token,
+      /^[0-9a-f]{32}$/,
+      "token 是 16 字节 CSPRNG 的十六进制",
+    );
   }
-  assert.notEqual(reply.files[0].token, reply.files[1].token, "同名两枚各得独立 token");
+  assert.notEqual(
+    reply.files[0].token,
+    reply.files[1].token,
+    "同名两枚各得独立 token",
+  );
 });
 
 // ---- ② 载荷归一：客户端路径一律不认 ----
@@ -316,7 +330,10 @@ test("安全修：token 换出路径即作废——同一 token 再用 → 拒�
   assert.ok(receipt && receipt.type === "attachmentSaved");
   assert.deepEqual(receipt.saved, []);
   assert.equal(receipt.rejected.length, 1);
-  assert.ok(/凭据|重新/.test(receipt.rejected[0].reason), receipt.rejected[0].reason);
+  assert.ok(
+    /凭据|重新/.test(receipt.rejected[0].reason),
+    receipt.rejected[0].reason,
+  );
 });
 
 test("安全修：未知 token / 别的窗口的 token → 拒绝（凭据按窗口隔离）", async () => {

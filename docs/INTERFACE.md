@@ -79,11 +79,11 @@ protocol.ts：字节流按 `\n` 分帧 → 逐行 `JSON.parse`（失败行进 de
 
 ### 4.4 设置项清单
 
-| 键                                                 | 类型       | 默认                                                                                                                                                                                           | 生效时机                                           |
-| -------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | --------------- | ---------------- |
+| 键                                                 | 类型       | 默认                                                                                                                                                                                                               | 生效时机                                           |
+| -------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- | --------------- | ---------------- |
 | `extensions.zotero-claudian.workspacePath`         | string     | darwin：`~/zotero-claudian-workspace`（`~` 展开；2026-09-11 修订避 TCC 授权面）；win32：`%USERPROFILE%\Documents\zotero-claudian-workspace`（经系统 API 取 Documents 实际落点，兼容 OneDrive 重定向，DESIGN.md D） | 下一次 spawn 即生效，进行中会话不中断              |
-| `extensions.zotero-claudian.defaultPermissionMode` | `"default" | "acceptEdits"                                                                                                                                                                                  | "plan"`                                            | `"acceptEdits"` | 新建会话的初始档 |
-| `extensions.zotero-claudian.cliPathOverride`       | string     | `""`                                                                                                                                                                                           | 空=自动解析；非空校验失败 → 回落自动解析并 UI 告警 |
+| `extensions.zotero-claudian.defaultPermissionMode` | `"default" | "acceptEdits"                                                                                                                                                                                                      | "plan"`                                            | `"acceptEdits"` | 新建会话的初始档 |
+| `extensions.zotero-claudian.cliPathOverride`       | string     | `""`                                                                                                                                                                                                               | 空=自动解析；非空校验失败 → 回落自动解析并 UI 告警 |
 
 存储走 Zotero.Prefs；设置页经 `Zotero.PreferencePanes.register`（见 DESIGN.md，源自 Z 1）。
 
@@ -155,17 +155,17 @@ protocol.ts：字节流按 `\n` 分帧 → 逐行 `JSON.parse`（失败行进 de
 
 **宿主→UI：**
 
-| type                     | 说明                                                                                           |
-| ------------------------ | ---------------------------------------------------------------------------------------------- |
-| `init`                   | 握手首条：宿主在 browser `load` 事件发出 `{type:"init"}`，触发页面回发 hello                   |
-| `sessionList`            | 全量会话索引 + 条目标题解析结果                                                                |
-| `streamEvent`            | `{sessionId, event}`（映射见 4.2）                                                             |
-| `history`                | `{sessionId, messages:[{role, text, ts}]}` —— 会话历史回显，UI 重建消息列表用（§4.5 旁挂历史） |
-| `permissionRequest`      | `{requestId, tool, inputSummary, rawInput}`                                                    |
+| type                     | 说明                                                                                                                                                                                                     |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init`                   | 握手首条：宿主在 browser `load` 事件发出 `{type:"init"}`，触发页面回发 hello                                                                                                                             |
+| `sessionList`            | 全量会话索引 + 条目标题解析结果                                                                                                                                                                          |
+| `streamEvent`            | `{sessionId, event}`（映射见 4.2）                                                                                                                                                                       |
+| `history`                | `{sessionId, messages:[{role, text, ts}]}` —— 会话历史回显，UI 重建消息列表用（§4.5 旁挂历史）                                                                                                           |
+| `permissionRequest`      | `{requestId, tool, inputSummary, rawInput}`                                                                                                                                                              |
 | `permissionResolved`     | `{requestId}` —— 该卡已结算（任一实例作答 / 120s 超时 / 该轮进程退出）：卡是广播给全部实例的，摘卡也必须全实例一致，各实例收到即从卡队列移除（2026-09-11 增补，修「A 答完切到文献 B 侧栏又见同一张卡」） |
-| `noteSaved` / `noteList` | 对应 4.3 出参                                                                                  |
-| `error`                  | `{code, message}`                                                                              |
-| `readerContext`          | `{itemKey, title, page, selection}` —— UI 顶栏显示当前关联文献                                 |
+| `noteSaved` / `noteList` | 对应 4.3 出参                                                                                                                                                                                            |
+| `error`                  | `{code, message}`                                                                                                                                                                                        |
+| `readerContext`          | `{itemKey, title, page, selection}` —— UI 顶栏显示当前关联文献                                                                                                                                           |
 
 **错误码总表**（桥 error 事件与函数出参共用）：
 `CLAUDE_NOT_FOUND` / `CLAUDE_AUTH_FAILED` / `WORKSPACE_UNAVAILABLE` / `SPAWN_FAILED`（含端点故障不 spawn，§4.8）/ `SESSION_BUSY`（会话有进行中 turn，send 拒绝，不排队）/ `ITEM_NOT_FOUND` / `NOTE_NOT_FOUND` / `EMPTY_CONTENT` / `SANITIZE_REJECTED` / `SAVE_FAILED` / `SESSION_GONE`（resume 失效：进程退出非 0 且无 result，stderrTail 含 resume/session 失效关键字——如 `No conversation found`、session 不存在类报错；UI 同时给「新建会话」按钮）。

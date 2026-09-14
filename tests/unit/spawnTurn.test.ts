@@ -699,7 +699,10 @@ test("spawnTurn channel=sh 包装与回退都起不来 → 单条 procError（�
   assert.equal(calls, 2);
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, "procError");
-  assert.equal(events[0].kind === "procError" && events[0].reason, "CLAUDE_NOT_FOUND");
+  assert.equal(
+    events[0].kind === "procError" && events[0].reason,
+    "CLAUDE_NOT_FOUND",
+  );
 });
 
 test("spawnTurn channel=direct: spawn 失败不重试（非 sh 通道行为不变）", async () => {

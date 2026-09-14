@@ -115,7 +115,12 @@ function bound(sessions = [S1]) {
 /** 一次「思考 → 工具 → 收尾文字」往返（真实流事件序，与 PLAN §8.3 装置同形） */
 function pass(
   state,
-  { think = "我先摸清工作区结构和内容。", tool = "Read", id = "t1", answer = "最终答案" } = {},
+  {
+    think = "我先摸清工作区结构和内容。",
+    tool = "Read",
+    id = "t1",
+    answer = "最终答案",
+  } = {},
 ) {
   let s = state;
   s = feed(s, { kind: "messageStart" });
@@ -123,9 +128,23 @@ function pass(
     s = feed(s, { kind: "thinkingDelta", index: 0, text: think });
   }
   if (tool !== null) {
-    s = feed(s, { kind: "toolBlockStart", index: 1, toolName: tool, toolUseId: id });
-    s = feed(s, { kind: "toolInputDelta", index: 1, jsonFragment: '{"file":"a.md"}' });
-    s = feed(s, { kind: "toolResult", toolUseId: id, isError: false, summary: "完成" });
+    s = feed(s, {
+      kind: "toolBlockStart",
+      index: 1,
+      toolName: tool,
+      toolUseId: id,
+    });
+    s = feed(s, {
+      kind: "toolInputDelta",
+      index: 1,
+      jsonFragment: '{"file":"a.md"}',
+    });
+    s = feed(s, {
+      kind: "toolResult",
+      toolUseId: id,
+      isError: false,
+      summary: "完成",
+    });
   }
   if (answer !== null) {
     s = feed(s, { kind: "textBlockStart", index: 2 });
@@ -202,7 +221,11 @@ test("R13 分轮：divider 归入前一轮，不计轮数与步数，但仍在 e
   const msgs = [u("甲"), a(TH("想"), T("答", 1)), d()];
   const g = roundsOf(msgs);
   assert.equal(g.length, 1, "divider 不得自成一轮");
-  assert.equal(g[0].endIndex, 2, "endIndex 仍为该轮最后一条 Turn 的下标（含 divider）");
+  assert.equal(
+    g[0].endIndex,
+    2,
+    "endIndex 仍为该轮最后一条 Turn 的下标（含 divider）",
+  );
   assert.equal(g[0].assistantTurns, 1, "divider 不计入 N");
   assert.equal(g[0].processSteps, 1, "divider 不计入 M");
   assert.equal(g[0].processBlocks.length, 1, "divider 不产出过程块");
@@ -237,10 +260,10 @@ test("R13 分轮：单助手轮的 N 与 M（N 数行、M 数块）", () => {
   assert.equal(g.length, 1);
   assert.equal(g[0].assistantTurns, 1);
   assert.equal(g[0].processSteps, 2);
-  assert.deepEqual(g[0].processBlocks.map((r) => r.block.blockType), [
-    "thinking",
-    "tool",
-  ]);
+  assert.deepEqual(
+    g[0].processBlocks.map((r) => r.block.blockType),
+    ["thinking", "tool"],
+  );
 });
 
 test("R13 分轮：N 与 M 各自独立（无过程块的 Turn 只进 N 不进 M）", () => {
@@ -267,7 +290,11 @@ test("R13 分轮：跨多条助手消息展平 —— 顺序与 turnIndex 都按
   assert.equal(g[0].assistantTurns, 3);
   assert.equal(g[0].processSteps, 4);
   assert.deepEqual(
-    g[0].processBlocks.map((r) => [r.turnIndex, r.block.blockType, r.block.index]),
+    g[0].processBlocks.map((r) => [
+      r.turnIndex,
+      r.block.blockType,
+      r.block.index,
+    ]),
     [
       [1, "thinking", 0],
       [1, "tool", 1],
@@ -288,13 +315,28 @@ test("R13 分轮：空数组 → []", () => {
 });
 
 test("R13 分轮：非数组入参 → 返回 [] 且不抛（TurnLike 同款兜底）", () => {
-  for (const junk of [null, undefined, "junk", 42, true, { role: "user" }, () => {}]) {
+  for (const junk of [
+    null,
+    undefined,
+    "junk",
+    42,
+    true,
+    { role: "user" },
+    () => {},
+  ]) {
     assert.deepEqual(groupRounds(junk), [], `入参 ${String(junk)} 应返回 []`);
   }
 });
 
 test("R13 分轮：数组内畸形条目 → 不抛（不崩即可，条目归一不在本轮契约面）", () => {
-  for (const junkEntry of [null, 7, "x", {}, { role: 123 }, { role: "assistant", blocks: "junk" }]) {
+  for (const junkEntry of [
+    null,
+    7,
+    "x",
+    {},
+    { role: 123 },
+    { role: "assistant", blocks: "junk" },
+  ]) {
     const out = groupRounds([u("甲"), junkEntry, a(T("答"))]);
     assert.ok(Array.isArray(out), "畸形条目不得让它抛/返回非数组");
   }
@@ -323,7 +365,10 @@ test("R13 分轮：覆盖全部消息，无遗漏无重叠（各轮首尾相接�
 });
 
 test("R13 分轮：groupRounds 顺手填好 tailText（§1.1 字段语义 = §1.3 的成品）", () => {
-  const g = roundsOf([u("甲"), a(TH("我先摸清工作区结构和内容。"), T("最终答案", 1))]);
+  const g = roundsOf([
+    u("甲"),
+    a(TH("我先摸清工作区结构和内容。"), T("最终答案", 1)),
+  ]);
   assert.equal(
     g[0].tailText,
     "我先摸清工作区结构和内容。",
@@ -338,7 +383,10 @@ test("R13 摘要：常量逐字（STRIP_LABEL / 截断上限 40 码点）", () =
 });
 
 test("R13 尾段：末块是 text → 取最后一条 thinking，摘要逐字含尾段", () => {
-  const msgs = [u("甲"), a(TH("我先摸清工作区结构和内容。"), TL("t1", 1), T("最终答案", 2))];
+  const msgs = [
+    u("甲"),
+    a(TH("我先摸清工作区结构和内容。"), TL("t1", 1), T("最终答案", 2)),
+  ];
   const r = R(msgs);
   assert.equal(stripTailText(r), "我先摸清工作区结构和内容。");
   assert.equal(
@@ -348,7 +396,10 @@ test("R13 尾段：末块是 text → 取最后一条 thinking，摘要逐字含
 });
 
 test("R13 尾段：末块非 text（tool 收尾）→ 取最后一条 text（BRIEF 示例形态）", () => {
-  const msgs = [u("甲"), a(TH("思考不取"), T("我先摸清工作区结构和内容。", 1), TL("t1", 2))];
+  const msgs = [
+    u("甲"),
+    a(TH("思考不取"), T("我先摸清工作区结构和内容。", 1), TL("t1", 2)),
+  ];
   const r = R(msgs);
   assert.equal(stripTailText(r), "我先摸清工作区结构和内容。");
   assert.equal(
@@ -366,7 +417,10 @@ test("R13 尾段：多条候选取「最后一条」，不是第一条", () => {
   ]);
   assert.equal(stripTailText(g1[0]), "新思考");
   // 末块是 tool → 取最后一条 text = 第二段
-  const g2 = roundsOf([u("甲"), a(T("第一段", 0), TH("想", 1), T("第二段", 2), TL("t1", 3))]);
+  const g2 = roundsOf([
+    u("甲"),
+    a(T("第一段", 0), TH("想", 1), T("第二段", 2), TL("t1", 3)),
+  ]);
   assert.equal(stripTailText(g2[0]), "第二段");
 });
 
@@ -441,7 +495,9 @@ test("R13 尾段清洗：空串 / 纯空白清洗后为空 → null（摘要只�
 });
 
 test("R13 尾段：不做 markdown 记号剥离（# / * / 反引号原样）", () => {
-  const t = stripTailText(R([u("甲"), a(TH("## 方法\n\n- 第一步 `code`"), T("答", 1))]));
+  const t = stripTailText(
+    R([u("甲"), a(TH("## 方法\n\n- 第一步 `code`"), T("答", 1))]),
+  );
   assert.equal(t, "## 方法 - 第一步 `code`", "只折叠空白，记号照原样");
   assert.ok(t.startsWith("##"), "标题记号不得被吃掉");
 });
@@ -481,7 +537,11 @@ test("R13 开合：回答本身报错（resultError）→ 保持展开", () => {
 
 test("R13 开合：CLI 进程异常（procError）→ 保持展开", () => {
   let s = bound();
-  s = fullRound(s, "甲", { kind: "procError", exitCode: 1, stderrTail: "boom" });
+  s = fullRound(s, "甲", {
+    kind: "procError",
+    exitCode: 1,
+    stderrTail: "boom",
+  });
   const r = roundsOf(s.messages)[0];
   assert.deepEqual(s.lastTurnEnd, { round: 0, end: "error" });
   assert.equal(stripAutoOpen(s, r), true);
@@ -530,7 +590,11 @@ test("R13 开合：lastTurnEnd.round 不匹配 → false（异常标记只对命
   assert.equal(g.length, 2);
   assert.deepEqual(s.lastTurnEnd, { round: 2, end: "error" });
   assert.equal(g[0].startIndex, 0);
-  assert.equal(stripAutoOpen(s, g[0]), false, "end 不是 ok 但 round 不匹配 → 仍收起");
+  assert.equal(
+    stripAutoOpen(s, g[0]),
+    false,
+    "end 不是 ok 但 round 不匹配 → 仍收起",
+  );
   assert.equal(stripAutoOpen(s, g[1]), true, "命中轮的异常保持展开");
 });
 
@@ -568,10 +632,18 @@ test("R13 迁移：已 interrupt() 的轮收到 result → 保持 aborted（不�
   let s = bound();
   s = midRound(s);
   s = interrupt(s).state;
-  assert.deepEqual(s.lastTurnEnd, { round: 0, end: "aborted" }, "interrupt() 进分支时立刻落标记");
+  assert.deepEqual(
+    s.lastTurnEnd,
+    { round: 0, end: "aborted" },
+    "interrupt() 进分支时立刻落标记",
+  );
   s = feed(s, RESULT);
   assert.equal(s.turnStatus, "idle");
-  assert.deepEqual(s.lastTurnEnd, { round: 0, end: "aborted" }, "result 只做裁决，不得把中断翻成 ok");
+  assert.deepEqual(
+    s.lastTurnEnd,
+    { round: 0, end: "aborted" },
+    "result 只做裁决，不得把中断翻成 ok",
+  );
 });
 
 test("R13 迁移：resultError → {round:0, end:'error'}", () => {
@@ -584,7 +656,11 @@ test("R13 迁移：resultError → {round:0, end:'error'}", () => {
 test("R13 迁移：procError / CLAUDE_NOT_FOUND 分支 → {round:0, end:'error'}", () => {
   let s = bound();
   s = midRound(s);
-  s = feed(s, { kind: "procError", reason: "CLAUDE_NOT_FOUND", exitCode: null });
+  s = feed(s, {
+    kind: "procError",
+    reason: "CLAUDE_NOT_FOUND",
+    exitCode: null,
+  });
   assert.equal(s.turnStatus, "idle", "事件确实落到了这个分支");
   assert.deepEqual(s.lastTurnEnd, { round: 0, end: "error" });
 });
@@ -602,13 +678,23 @@ test("R13 迁移：error 宿主消息且收尾前非 idle → {round:0, end:'err
   let s = bound();
   s = userSend(s, "甲").state;
   assert.equal(s.turnStatus, "waiting");
-  s = host(s, { type: "error", code: "ITEM_NOT_FOUND", message: "boom", sessionId: "s1" });
+  s = host(s, {
+    type: "error",
+    code: "ITEM_NOT_FOUND",
+    message: "boom",
+    sessionId: "s1",
+  });
   assert.deepEqual(s.lastTurnEnd, { round: 0, end: "error" });
   // 同一判据在 streaming 下同样成立
   let s2 = bound();
   s2 = midRound(s2);
   assert.equal(s2.turnStatus, "streaming");
-  s2 = host(s2, { type: "error", code: "SOME_CODE", message: "boom", sessionId: "s1" });
+  s2 = host(s2, {
+    type: "error",
+    code: "SOME_CODE",
+    message: "boom",
+    sessionId: "s1",
+  });
   assert.deepEqual(s2.lastTurnEnd, { round: 0, end: "error" });
 });
 
@@ -616,8 +702,17 @@ test("R13 迁移（反例）：error 宿主消息但 turnStatus 已是 idle → 
   let s = bound();
   s = fullRound(s, "甲");
   assert.deepEqual(s.lastTurnEnd, { round: 0, end: "ok" });
-  s = host(s, { type: "error", code: "SOME_CODE", message: "迟到的错误", sessionId: "s1" });
-  assert.deepEqual(s.lastTurnEnd, { round: 0, end: "ok" }, "已正常收尾的轮不得被翻成 error");
+  s = host(s, {
+    type: "error",
+    code: "SOME_CODE",
+    message: "迟到的错误",
+    sessionId: "s1",
+  });
+  assert.deepEqual(
+    s.lastTurnEnd,
+    { round: 0, end: "ok" },
+    "已正常收尾的轮不得被翻成 error",
+  );
 });
 
 test("R13 迁移：换会话（selectSession → switchView）→ null", () => {
@@ -668,7 +763,10 @@ test("R13 迁移：换分支（reduceBranchCreated，非 keepView）→ null", (
 test("R13 迁移：本地 /clear（clearView）→ null", () => {
   let s = bound();
   s = fullRound(s, "甲");
-  assert.ok(s.messages.length > 0, "清空之前视图里有消息（否则这条用例是空转）");
+  assert.ok(
+    s.messages.length > 0,
+    "清空之前视图里有消息（否则这条用例是空转）",
+  );
   assert.deepEqual(s.lastTurnEnd, { round: 0, end: "ok" });
   s = clearView(s);
   assert.deepEqual(s.messages, []);
@@ -687,8 +785,15 @@ test("R13 迁移：reduceHistory 且 idle → {round:-1, end:'ok'}", () => {
       { role: "user", text: "乙", ts: 3 },
     ],
   });
-  assert.deepEqual(s.messages.map((t) => t.role), ["user", "assistant", "user"]);
-  assert.deepEqual(s.lastTurnEnd, { round: -1, end: "ok" }, "回放轮一律视为已完成无错误");
+  assert.deepEqual(
+    s.messages.map((t) => t.role),
+    ["user", "assistant", "user"],
+  );
+  assert.deepEqual(
+    s.lastTurnEnd,
+    { round: -1, end: "ok" },
+    "回放轮一律视为已完成无错误",
+  );
 });
 
 test("R13 迁移：reduceHistory 且在途（非 idle）→ 不变", () => {
@@ -705,7 +810,11 @@ test("R13 迁移：reduceHistory 且在途（非 idle）→ 不变", () => {
     ],
   });
   assert.equal(s.turnStatus, "interrupting", "在途轮仍在跑");
-  assert.deepEqual(s.lastTurnEnd, { round: 0, end: "aborted" }, "在途轮归 turnStatus 判，回放不得动它");
+  assert.deepEqual(
+    s.lastTurnEnd,
+    { round: 0, end: "aborted" },
+    "在途轮归 turnStatus 判，回放不得动它",
+  );
 });
 
 test("R13 迁移：userSend（新轮开始）→ null", () => {
@@ -721,7 +830,11 @@ test("R13 迁移：editSessionRequest（新轮开始）→ null", () => {
   let s = bound();
   s = fullRound(s, "甲");
   s = messageEditRequest(s, 0);
-  assert.equal(s.actions.editingIndex, 0, "先进编辑态（否则 editSessionRequest 空转）");
+  assert.equal(
+    s.actions.editingIndex,
+    0,
+    "先进编辑态（否则 editSessionRequest 空转）",
+  );
   const r = editSessionRequest(s, "改过的甲");
   assert.ok(r.msg, "编辑重发应产出 editSession 消息");
   s = r.state;
@@ -748,7 +861,11 @@ test("R13 迁移：fireRetry → 不变", () => {
   const before = s.lastTurnEnd;
   s = fireRetry(s).state;
   assert.equal(s.turnStatus, "waiting");
-  assert.deepEqual(s.lastTurnEnd, before, "fireRetry 不动该字段（靠 turnStatus !== idle 展开）");
+  assert.deepEqual(
+    s.lastTurnEnd,
+    before,
+    "fireRetry 不动该字段（靠 turnStatus !== idle 展开）",
+  );
 });
 
 test("R13 迁移：SESSION_BUSY 用尽、撤回刚发的轮 → round 记被撤回那一轮（不得落到 0）", () => {
@@ -762,11 +879,19 @@ test("R13 迁移：SESSION_BUSY 用尽、撤回刚发的轮 → round 记被撤�
     s = fireRetry(s).state;
     s = host(s, SESSION_BUSY);
   }
-  assert.deepEqual(s.messages.map((t) => t.role), ["user", "assistant"], "用尽 → 撤回刚发的 user 轮");
+  assert.deepEqual(
+    s.messages.map((t) => t.role),
+    ["user", "assistant"],
+    "用尽 → 撤回刚发的 user 轮",
+  );
   assert.equal(s.turnStatus, "idle");
   assert.equal(s.restoreDraft, "乙", "原文退回输入框（既有行为）");
   assert.equal(s.lastTurnEnd.end, "error");
-  assert.equal(s.lastTurnEnd.round, 2, "记的是被撤回那一轮的首条 user 下标（撤回前算出的）");
+  assert.equal(
+    s.lastTurnEnd.round,
+    2,
+    "记的是被撤回那一轮的首条 user 下标（撤回前算出的）",
+  );
   const g = roundsOf(s.messages);
   assert.equal(
     stripAutoOpen(s, g[0]),
@@ -833,7 +958,10 @@ test("R13 渲染项：多轮交错顺序 + key 稳定 + index 恒等于 messages
     items.map((it) => it.kind),
     ["turn", "strip", "turn", "turn", "strip", "turn"],
   );
-  assert.deepEqual(items.map((it) => it.index), [0, 0, 2, 3, 3, 5]);
+  assert.deepEqual(
+    items.map((it) => it.index),
+    [0, 0, 2, 3, 3, 5],
+  );
   assert.deepEqual(
     items.filter((it) => it.kind === "strip").map((it) => it.round.startIndex),
     [0, 3],
@@ -864,7 +992,10 @@ test("R13 渲染项：0 过程块的轮不产条带项", () => {
 test("R13 渲染项：空消息 / 非数组入参 → [] 且不抛", () => {
   assert.deepEqual(buildRenderItems([]), []);
   for (const junk of [null, undefined, "junk", 42, {}]) {
-    assert.deepEqual(buildRenderItems(junk), [], `入参 ${String(junk)} 应返回 []`);
+    assert.deepEqual(
+      buildRenderItems(junk),
+      [],
+      `入参 ${String(junk)} 应返回 []`,
+    );
   }
 });
-

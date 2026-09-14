@@ -33,7 +33,11 @@ test("R7-PERF shouldRender：流式距上次不足间隔 → 不画；到点 →
   assert.equal(shouldRender(last + 1, last, true), false);
   assert.equal(shouldRender(last + 149, last, true), false);
   assert.equal(shouldRender(last + 150, last, true), true, "到点即画");
-  assert.equal(shouldRender(last + 900, last, true), true, "卡顿/后台节流后补画");
+  assert.equal(
+    shouldRender(last + 900, last, true),
+    true,
+    "卡顿/后台节流后补画",
+  );
 });
 
 test("R7-PERF nextRenderDelay：补足到间隔的剩余毫秒；已到点/从未渲染 → 0", () => {
@@ -80,7 +84,10 @@ test("R7-PERF 3s/120 个 delta：渲染次数 ≈ 时长/150ms（合并中间帧
     text: "x".repeat(i + 1),
   }));
   const spanMs = 25 * samples.length; // 3000ms
-  const { paints, painted } = simulateStream(samples, STREAM_RENDER_INTERVAL_MS);
+  const { paints, painted } = simulateStream(
+    samples,
+    STREAM_RENDER_INTERVAL_MS,
+  );
 
   const naive = samples.length; // 未节流：每个 delta 一次全量重解析（修复前的行为）
   assert.equal(naive, 120);
@@ -106,7 +113,10 @@ test("R7-PERF 极慢流（delta 间隔 > 150ms）：每个 delta 立即画，不
     at: 400 * (i + 1),
     text: "y".repeat(i + 1),
   }));
-  const { paints, painted } = simulateStream(samples, STREAM_RENDER_INTERVAL_MS);
+  const { paints, painted } = simulateStream(
+    samples,
+    STREAM_RENDER_INTERVAL_MS,
+  );
   assert.equal(
     paints,
     samples.length + 1, // 每个 delta 一次 + 收尾帧一次

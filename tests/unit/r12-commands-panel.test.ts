@@ -78,7 +78,8 @@ function makeDeps(
 
 const USER_SKILLS = `/home/u/${SKILLS_DIR_USER.replace(/^~\//, "")}`;
 const PROJECT_SKILLS = `/ws/${SKILLS_DIR_PROJECT}`;
-const skillMd = (dir: string, name: string): string => `${dir}/${name}/SKILL.md`;
+const skillMd = (dir: string, name: string): string =>
+  `${dir}/${name}/SKILL.md`;
 
 const fm = (name: string, description: string): string =>
   `---\nname: ${name}\ndescription: ${description}\n---\n\n正文（不该进结果）`;
@@ -86,10 +87,10 @@ const fm = (name: string, description: string): string =>
 // ---- 内置命令 ----
 
 test("R12-A 内置：只收实测可用的两个（/compact /model），且都标 builtin", () => {
-  assert.deepEqual(
-    BUILTIN_COMMANDS.map((c) => c.name).sort(),
-    ["compact", "model"],
-  );
+  assert.deepEqual(BUILTIN_COMMANDS.map((c) => c.name).sort(), [
+    "compact",
+    "model",
+  ]);
   for (const cmd of BUILTIN_COMMANDS) {
     assert.equal(cmd.source, "builtin");
     assert.ok(cmd.description.length > 0, `缺描述：${cmd.name}`);
@@ -127,7 +128,10 @@ test("R12-A 技能：名字取 frontmatter 的 name（与目录名不同则以 f
     },
   );
   const out = await scanSkills(deps);
-  assert.deepEqual(out.map((c) => c.name), ["probe2-front"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["probe2-front"],
+  );
   assert.equal(out[0].source, "skill");
   assert.equal(out[0].description, "名字解析探针");
 });
@@ -138,7 +142,10 @@ test("R12-A 技能：frontmatter 没写 name → 用目录名兜底（面板里�
     { [skillMd(USER_SKILLS, "dir-only")]: "---\ndescription: 只有描述\n---\n" },
   );
   const out = await scanSkills(deps);
-  assert.deepEqual(out.map((c) => c.name), ["dir-only"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["dir-only"],
+  );
   assert.equal(out[0].description, "只有描述");
 });
 
@@ -178,7 +185,10 @@ test("R12-A 技能：非目录、符号链接、没有 SKILL.md 的目录一律�
     { [skillMd(USER_SKILLS, "ok")]: fm("ok", "好技能") },
   );
   const out = await scanSkills(deps);
-  assert.deepEqual(out.map((c) => c.name), ["ok"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["ok"],
+  );
   assert.ok(
     !deps.listed.includes(`${USER_SKILLS}/linked`),
     "符号链接目录不得被展开",
@@ -217,7 +227,10 @@ test("R12-A 技能：SKILL.md > 64KB 跳过（正好 64KB 保留）", async () =
     },
   );
   const out = await scanSkills(deps);
-  assert.deepEqual(out.map((c) => c.name), ["exact"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["exact"],
+  );
 });
 
 test("R12-A 技能：同名去重 —— 项目级覆盖用户级（只留一条，描述取项目级）", async () => {
@@ -280,9 +293,10 @@ test("R12-A 面板：选中技能/内置 → 只往输入框插 `/名字 `，**�
   ]) {
     const inserted: string[] = [];
     const sent: string[] = [];
-    const state = commandResults(commandPanelOpen(initialCommandPickerState()), [
-      cmd,
-    ]);
+    const state = commandResults(
+      commandPanelOpen(initialCommandPickerState()),
+      [cmd],
+    );
     commandAccept(state, cmd, {
       insertText: (t: string) => inserted.push(t),
       send: (t: string) => sent.push(t),

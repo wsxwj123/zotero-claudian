@@ -32,12 +32,21 @@ const withContext = () => ({
 // ---- 打开选择器：两条路径的形态 ----
 
 test("笔记按钮：选段路径开选择器 = origin=selection + 发 listNotes", () => {
-  const { state, msg } = beginNoteSave(withContext(), 3, "<p>选段</p>", "selection");
+  const { state, msg } = beginNoteSave(
+    withContext(),
+    3,
+    "<p>选段</p>",
+    "selection",
+  );
   assert.deepEqual(msg, { type: "listNotes", itemKey: "ITEM1" });
   assert.equal(state.notePicker.turnIndex, 3);
   assert.equal(state.notePicker.itemKey, "ITEM1");
   assert.equal(state.notePicker.html, "<p>选段</p>");
-  assert.equal(state.notePicker.notes, null, "清单在路上 → 先给「读取笔记列表…」");
+  assert.equal(
+    state.notePicker.notes,
+    null,
+    "清单在路上 → 先给「读取笔记列表…」",
+  );
   assert.equal(state.notePicker.origin, "selection");
 });
 
@@ -142,7 +151,12 @@ test("笔记按钮：取消 → 收起选择器且不动其它字段；无选择
 // ---- 选中后的消息载荷 ----
 
 test("笔记按钮：选「创建新笔记」→ saveNote mode=new（带选段 html + 固化 itemKey）", () => {
-  const picked = beginNoteSave(withContext(), 5, "<p>选段</p>", "selection").state;
+  const picked = beginNoteSave(
+    withContext(),
+    5,
+    "<p>选段</p>",
+    "selection",
+  ).state;
   const r = notePickerSelect(picked, null);
   assert.deepEqual(r.msg, {
     type: "saveNote",
@@ -155,7 +169,12 @@ test("笔记按钮：选「创建新笔记」→ saveNote mode=new（带选段 h
 });
 
 test("笔记按钮：选「追加到《…》」→ saveNote mode=append + noteKey", () => {
-  const picked = beginNoteSave(withContext(), 5, "<p>选段</p>", "selection").state;
+  const picked = beginNoteSave(
+    withContext(),
+    5,
+    "<p>选段</p>",
+    "selection",
+  ).state;
   const listed = reduceHostMessage(picked, {
     type: "noteList",
     notes: [{ noteKey: "N9", title: "旧笔记", updatedAt: 1 }],
@@ -178,7 +197,12 @@ test("笔记按钮：选中期间换文献 → 目标 itemKey 仍是打开时固
   const picked = beginNoteSave(withContext(), 0, "<p>x</p>", "selection").state;
   const switched = {
     ...picked,
-    readerContext: { itemKey: "ITEM2", title: "另一篇", page: 1, selection: null },
+    readerContext: {
+      itemKey: "ITEM2",
+      title: "另一篇",
+      page: 1,
+      selection: null,
+    },
   };
   assert.equal(notePickerSelect(switched, null).msg.itemKey, "ITEM1");
 });

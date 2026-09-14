@@ -104,7 +104,11 @@ test("R9-diag 报告：缺字段写 (error: 未采集)，采集失败写 (error:
     cli: { error: "shell PATH 探测失败" },
   });
   const lines = bodyLines(text);
-  assert.equal(lines.length, DIAG_KEYS.length, "缺字段不吞行：行数仍是白名单长度");
+  assert.equal(
+    lines.length,
+    DIAG_KEYS.length,
+    "缺字段不吞行：行数仍是白名单长度",
+  );
   assert.match(lines[1], /^plugin: +\(error: 未采集\)$/);
   assert.match(lines[4], /^cli: +\(error: shell PATH 探测失败\)$/);
   // 已有的值照常打印

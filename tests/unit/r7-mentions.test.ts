@@ -114,9 +114,30 @@ test("R7-B 检索：无命中 → 空数组（不是 null/undefined）", () => {
 
 test("R7-B 检索：命中多条时按输入序返回（下拉列表不抖动）", () => {
   const many: MentionSearchItem[] = [
-    { itemKey: "M1", title: "共同主题：甲", creators: [], year: "2024", publication: "某刊", itemType: "journalArticle" },
-    { itemKey: "M2", title: "无关条目", creators: [], year: "2024", publication: "某刊", itemType: "journalArticle" },
-    { itemKey: "M3", title: "共同主题：丙", creators: [], year: "2024", publication: "某刊", itemType: "journalArticle" },
+    {
+      itemKey: "M1",
+      title: "共同主题：甲",
+      creators: [],
+      year: "2024",
+      publication: "某刊",
+      itemType: "journalArticle",
+    },
+    {
+      itemKey: "M2",
+      title: "无关条目",
+      creators: [],
+      year: "2024",
+      publication: "某刊",
+      itemType: "journalArticle",
+    },
+    {
+      itemKey: "M3",
+      title: "共同主题：丙",
+      creators: [],
+      year: "2024",
+      publication: "某刊",
+      itemType: "journalArticle",
+    },
   ];
   assert.deepEqual(
     searchMentionItems(many, "共同主题").map((it) => it.itemKey),
@@ -206,9 +227,14 @@ const TABLE: Record<string, RawRef> = {
   },
 };
 
-function deps(overrides: Partial<{ resolveItem: (k: string) => Promise<RawRef | null> }> = {}) {
+function deps(
+  overrides: Partial<{
+    resolveItem: (k: string) => Promise<RawRef | null>;
+  }> = {},
+) {
   return {
-    resolveItem: async (key: string): Promise<RawRef | null> => TABLE[key] ?? null,
+    resolveItem: async (key: string): Promise<RawRef | null> =>
+      TABLE[key] ?? null,
     ...overrides,
   };
 }
@@ -481,8 +507,14 @@ test("R7-B deny：20 个目录 → 40 条规则，一条不少（红线：不得
   const rules = denyRules(buildAttachmentDenySettings(dirs));
   assert.equal(rules.length, 40);
   for (const dir of dirs) {
-    assert.ok(rules.includes(`Write(//${dir.slice(1)}/**)`), `缺 ${dir} 的 Write`);
-    assert.ok(rules.includes(`Edit(//${dir.slice(1)}/**)`), `缺 ${dir} 的 Edit`);
+    assert.ok(
+      rules.includes(`Write(//${dir.slice(1)}/**)`),
+      `缺 ${dir} 的 Write`,
+    );
+    assert.ok(
+      rules.includes(`Edit(//${dir.slice(1)}/**)`),
+      `缺 ${dir} 的 Edit`,
+    );
   }
 });
 

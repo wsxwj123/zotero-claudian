@@ -523,7 +523,10 @@ test("R6 净化(回修)：Windows 设备名带扩展名同样要加后缀（CON.
     assert.ok(/-(9)/.test(dir), `未加后缀：${raw} → ${dir}`);
     // 判据：第一个 . 之前的那段不再是裸设备名
     const head = dir.split(".")[0].toLowerCase();
-    assert.ok(!/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(head), `仍是设备名：${dir}`);
+    assert.ok(
+      !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(head),
+      `仍是设备名：${dir}`,
+    );
   }
 });
 

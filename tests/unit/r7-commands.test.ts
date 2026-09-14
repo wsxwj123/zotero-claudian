@@ -79,7 +79,11 @@ test("R7-C 白名单：名称 → 动作一一对应（九个动作互不相同�
       `本地命令必须映射到具体动作：${JSON.stringify(actions)}`,
     );
   }
-  assert.equal(new Set(actions).size, LOCAL_NAMES.length, "动作不得重复（/note 不能等于 /export）");
+  assert.equal(
+    new Set(actions).size,
+    LOCAL_NAMES.length,
+    "动作不得重复（/note 不能等于 /export）",
+  );
 });
 
 test("R7-C 白名单：resolveLocalCommand 与白名单逐条同口径", () => {
@@ -126,7 +130,10 @@ test("R7-C 白名单：命令名带参数时不抛、也不串台（'/new 额外
   assert.doesNotThrow(() => {
     hit = resolveLocalCommand("/new 额外的参数");
   });
-  assert.ok(hit == null || bare(hit.name) === "new", `串台成了 ${JSON.stringify(hit)}`);
+  assert.ok(
+    hit == null || bare(hit.name) === "new",
+    `串台成了 ${JSON.stringify(hit)}`,
+  );
 });
 
 // ---- 自定义命令解析 ----
@@ -148,7 +155,11 @@ test("R7-C 解析：无 frontmatter → 用文件名（去掉 .md）", () => {
   });
   assert.ok(parsed);
   assert.equal(parsed.name, "refactor");
-  assert.equal(String(parsed.description ?? ""), "", "无描述时给空，不给 null 字样");
+  assert.equal(
+    String(parsed.description ?? ""),
+    "",
+    "无描述时给空，不给 null 字样",
+  );
 });
 
 test("R7-C 解析：frontmatter 缺 name → 回落文件名", () => {
@@ -246,7 +257,10 @@ test("R7-C 扫描：非 .md 文件忽略（.txt / .md.bak / 无扩展名）", as
     { [`${PROJECT_DIR}/ok.md`]: "正文" },
   );
   const out = await scanCommands(deps);
-  assert.deepEqual(out.map((c) => c.name), ["ok"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["ok"],
+  );
 });
 
 test("R7-C 扫描：子目录不递归（递归开关 YAGNI）", async () => {
@@ -263,16 +277,22 @@ test("R7-C 扫描：子目录不递归（递归开关 YAGNI）", async () => {
 });
 
 test("R7-C 扫描：符号链接不跟随（文件链接与目录链接都跳过）", async () => {
-  const deps = makeDeps({
-    [PROJECT_DIR]: [
-      { name: "link.md", symlink: true },
-      { name: "linkdir", dir: true, symlink: true },
-      { name: "real.md" },
-    ],
-    [`${PROJECT_DIR}/linkdir`]: [{ name: "secret.md" }],
-  }, { [`${PROJECT_DIR}/real.md`]: "正文" });
+  const deps = makeDeps(
+    {
+      [PROJECT_DIR]: [
+        { name: "link.md", symlink: true },
+        { name: "linkdir", dir: true, symlink: true },
+        { name: "real.md" },
+      ],
+      [`${PROJECT_DIR}/linkdir`]: [{ name: "secret.md" }],
+    },
+    { [`${PROJECT_DIR}/real.md`]: "正文" },
+  );
   const out = await scanCommands(deps);
-  assert.deepEqual(out.map((c) => c.name), ["real"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["real"],
+  );
   assert.ok(
     !deps.listed.includes(`${PROJECT_DIR}/linkdir`),
     "符号链接目录不得被展开",
@@ -286,12 +306,24 @@ test("R7-C 扫描：符号链接不跟随（文件链接与目录链接都跳过
 test("R7-C 扫描：单文件 > 64KB 跳过，且**不去读**（不做无谓 IO）", async () => {
   const big = `${PROJECT_DIR}/big.md`;
   const deps = makeDeps(
-    { [PROJECT_DIR]: [{ name: "big.md", size: COMMAND_FILE_MAX_BYTES + 1 }, { name: "small.md" }] },
+    {
+      [PROJECT_DIR]: [
+        { name: "big.md", size: COMMAND_FILE_MAX_BYTES + 1 },
+        { name: "small.md" },
+      ],
+    },
     { [big]: "x", [`${PROJECT_DIR}/small.md`]: "小文件" },
   );
   const out = await scanCommands(deps);
-  assert.equal(COMMAND_FILE_MAX_BYTES, 64 * 1024, "单文件上限 64KB（PLAN §3.5）");
-  assert.deepEqual(out.map((c) => c.name), ["small"]);
+  assert.equal(
+    COMMAND_FILE_MAX_BYTES,
+    64 * 1024,
+    "单文件上限 64KB（PLAN §3.5）",
+  );
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["small"],
+  );
   assert.ok(!deps.read.includes(big), "超限文件不得被读取");
 });
 
@@ -301,17 +333,26 @@ test("R7-C 扫描：正好 64KB 保留（边界，'>' 才跳过）", async () =>
     { [`${PROJECT_DIR}/exact.md`]: "正文" },
   );
   const out = await scanCommands(deps);
-  assert.deepEqual(out.map((c) => c.name), ["exact"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["exact"],
+  );
 });
 
 test("R7-C 扫描：总数上限 200（250 个文件只回 200，且不重复）", async () => {
-  const files = Array.from({ length: 250 }, (_, i) => ({ name: `cmd${String(i).padStart(3, "0")}.md` }));
+  const files = Array.from({ length: 250 }, (_, i) => ({
+    name: `cmd${String(i).padStart(3, "0")}.md`,
+  }));
   const texts: Record<string, string> = {};
   for (const f of files) texts[`${PROJECT_DIR}/${f.name}`] = "正文";
   const out = await scanCommands(makeDeps({ [PROJECT_DIR]: files }, texts));
   assert.equal(COMMANDS_MAX, 200, "总数上限 200（PLAN §3.5）");
   assert.equal(out.length, COMMANDS_MAX);
-  assert.equal(new Set(out.map((c) => c.name)).size, out.length, "截断不得产出重复项");
+  assert.equal(
+    new Set(out.map((c) => c.name)).size,
+    out.length,
+    "截断不得产出重复项",
+  );
 });
 
 test("R7-C 扫描：每条带 source（project / user）", async () => {
@@ -351,7 +392,10 @@ test("R7-C 扫描：目录不存在/读不到 → 不抛错，另一处照常返
     { [`${PROJECT_DIR}/only.md`]: "正文" },
   );
   const out = await scanCommands(deps);
-  assert.deepEqual(out.map((c) => c.name), ["only"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["only"],
+  );
 });
 
 test("R7-C 扫描：单个文件读失败（null）→ 跳过它，整批不崩", async () => {
@@ -360,7 +404,10 @@ test("R7-C 扫描：单个文件读失败（null）→ 跳过它，整批不崩"
     { [`${PROJECT_DIR}/good.md`]: "正文" },
   );
   const out = await scanCommands(deps);
-  assert.deepEqual(out.map((c) => c.name), ["good"]);
+  assert.deepEqual(
+    out.map((c) => c.name),
+    ["good"],
+  );
 });
 
 // ---- 过滤 ----
@@ -385,7 +432,10 @@ test("R7-C 过滤：大小写不敏感", () => {
 });
 
 test("R7-C 过滤：中文可匹配", () => {
-  assert.deepEqual(filterCommands(LIST, "笔记").map((c) => c.name), ["导出笔记"]);
+  assert.deepEqual(
+    filterCommands(LIST, "笔记").map((c) => c.name),
+    ["导出笔记"],
+  );
 });
 
 test("R7-C 过滤：无命中 → 空数组（不是 null/undefined）", () => {
@@ -433,11 +483,17 @@ test("R7-C 面板：结果到达 → 候选就位；空结果标 empty", () => {
 test("R7-C 选中：CLI 命令 → 只往输入框插文本，**不自动发送**（零 send）", () => {
   const inserted: string[] = [];
   const sent: string[] = [];
-  const state = commandResults(commandPanelOpen(initialCommandPickerState()), LIST);
+  const state = commandResults(
+    commandPanelOpen(initialCommandPickerState()),
+    LIST,
+  );
   const after = commandAccept(
     state,
     { name: "summarize", description: "总结", source: "project" },
-    { insertText: (t: string) => inserted.push(t), send: (t: string) => sent.push(t) },
+    {
+      insertText: (t: string) => inserted.push(t),
+      send: (t: string) => sent.push(t),
+    },
   );
   assert.equal(sent.length, 0, "选中命令不得自动发送（契约：只插入不发送）");
   assert.equal(inserted.length, 1, "要往输入框插一次文本");
@@ -454,11 +510,18 @@ test("R7-C 选中：插入骨架是「/名字 」—— 留尾空格等用户补
   commandAccept(
     initialCommandPickerState(),
     { name: "summarize", source: "user" },
-    { insertText: (t: string) => inserted.push(t), send: (t: string) => sent.push(t) },
+    {
+      insertText: (t: string) => inserted.push(t),
+      send: (t: string) => sent.push(t),
+    },
   );
   assert.equal(sent.length, 0);
   assert.equal(inserted.length, 1);
-  assert.equal(inserted[0], "/summarize ", `插入骨架要带斜杠与尾空格：${JSON.stringify(inserted[0])}`);
+  assert.equal(
+    inserted[0],
+    "/summarize ",
+    `插入骨架要带斜杠与尾空格：${JSON.stringify(inserted[0])}`,
+  );
 });
 
 test("R7-C 选中：本地命令 → 不插文本、不发送（面板直接处理，零往返）", () => {
@@ -467,7 +530,10 @@ test("R7-C 选中：本地命令 → 不插文本、不发送（面板直接处�
   const after = commandAccept(
     initialCommandPickerState(),
     { name: "new", source: "local" },
-    { insertText: (t: string) => inserted.push(t), send: (t: string) => sent.push(t) },
+    {
+      insertText: (t: string) => inserted.push(t),
+      send: (t: string) => sent.push(t),
+    },
   );
   assert.equal(inserted.length, 0, "本地命令不该变成输入框文本");
   assert.equal(sent.length, 0);

@@ -51,7 +51,9 @@ test("命中率：只计分母三项（input=0 / cacheRead=500 / cacheCreation=5
 });
 
 test("命中率：返回整数（Math.round，不是小数百分比）", () => {
-  assert.ok(Number.isInteger(cacheHitPercent(u({ input: 697, cacheRead: 119040 }))));
+  assert.ok(
+    Number.isInteger(cacheHitPercent(u({ input: 697, cacheRead: 119040 }))),
+  );
   assert.ok(Number.isInteger(cacheHitPercent(u({ input: 3, cacheRead: 1 }))));
 });
 

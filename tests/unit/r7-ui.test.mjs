@@ -56,14 +56,20 @@ test("R7-UI 面板：打开 → open 置真；关闭 → 置假且**已选 chips
 });
 
 test("R7-UI 面板：输入关键词 → query 更新且面板保持开（@ 后继续打字）", () => {
-  const s = mentionQueryChange(mentionPanelOpen(initialMentionPickerState()), "机器");
+  const s = mentionQueryChange(
+    mentionPanelOpen(initialMentionPickerState()),
+    "机器",
+  );
   assert.equal(s.query, "机器");
   assert.equal(s.open, true);
 });
 
 test("R7-UI 面板：结果到达 → 候选就位（最多 20 条）", () => {
   const items = Array.from({ length: 25 }, (_, i) => at(`K${i}`));
-  const s = mentionResults(mentionPanelOpen(initialMentionPickerState()), items);
+  const s = mentionResults(
+    mentionPanelOpen(initialMentionPickerState()),
+    items,
+  );
   assert.ok(s.items.length <= 20, `候选展示上限 20，实际 ${s.items.length}`);
   assert.equal(s.items[0].itemKey, "K0");
 });
@@ -167,15 +173,25 @@ test("R7-UI 指令：文件不存在 → exists:false + 空文本（UI 提示「
 });
 
 test("R7-UI 指令：脏标记 —— 编辑置脏，改回原文复归干净", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const edited = instructionsEditorEdit(loaded, "# 规则\n改成英文\n");
   assert.equal(instructionsEditorDirty(edited), true);
   const reverted = instructionsEditorEdit(edited, LOADED.text);
-  assert.equal(instructionsEditorDirty(reverted), false, "内容回到落盘态即不脏");
+  assert.equal(
+    instructionsEditorDirty(reverted),
+    false,
+    "内容回到落盘态即不脏",
+  );
 });
 
 test("R7-UI 指令：保存成功回执 → 非脏、路径回填、错误清空", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const edited = instructionsEditorEdit(loaded, "新内容");
   const saved = instructionsEditorSaved(edited, {
     type: "instructionsSaved",
@@ -190,7 +206,10 @@ test("R7-UI 指令：保存成功回执 → 非脏、路径回填、错误清空
 });
 
 test("R7-UI 指令：保存失败回执 → 错误原文上屏、**仍脏**、编辑器不关（防以为存上了）", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const edited = instructionsEditorEdit(loaded, "新内容");
   const failed = instructionsEditorSaved(edited, {
     type: "instructionsSaved",
@@ -206,7 +225,10 @@ test("R7-UI 指令：保存失败回执 → 错误原文上屏、**仍脏**、�
 });
 
 test("R7-UI 指令：加载回执带 error → 错误上屏，且不清空用户正在编辑的内容", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const edited = instructionsEditorEdit(loaded, "还没保存的输入");
   const failed = instructionsEditorLoad(edited, {
     type: "instructions",
@@ -221,7 +243,10 @@ test("R7-UI 指令：加载回执带 error → 错误上屏，且不清空用户
 });
 
 test("R7-UI 指令：脏态关闭需二次确认 —— 未确认不关、内容不丢", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const edited = instructionsEditorEdit(loaded, "未保存的改动");
   const refused = instructionsEditorClose(edited, { confirmDiscard: false });
   assert.equal(refused.closed, false);
@@ -234,14 +259,20 @@ test("R7-UI 指令：脏态关闭需二次确认 —— 未确认不关、内容
 });
 
 test("R7-UI 指令：干净态直接关闭，无需确认", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const closed = instructionsEditorClose(loaded, {});
   assert.equal(closed.closed, true);
   assert.equal(closed.state.open, false);
 });
 
 test("R7-UI 指令：切换作用域 → scope 跟随（全局 / 当前分类）", () => {
-  const loaded = instructionsEditorLoad(initialInstructionsEditor("global"), LOADED);
+  const loaded = instructionsEditorLoad(
+    initialInstructionsEditor("global"),
+    LOADED,
+  );
   const switched = instructionsEditorSetScope(loaded, "collection");
   assert.equal(switched.scope, "collection");
   assert.equal(switched.open, true, "切换作用域不关弹层");

@@ -42,6 +42,7 @@
 2. Zotero 菜单：**工具 → 插件**
 3. 插件面板右上角齿轮 → **Install Plugin From File…** → 选刚下载的 `.xpi`
 4. 重启 Zotero。工具栏出现「Claude」按钮即安装成功——点它会展开右侧栏并定位到 Claude 面板
+5. 以后升级不用重新下载：Zotero 会自动检查插件更新；也可在插件面板齿轮 → **检查更新（Check for Updates）** 手动触发
 
 > 未签名 XPI 的安装提示属正常（本插件不申请 Zotero 官方签名）。
 
@@ -136,7 +137,13 @@
 - **换 Provider（中转站）**：设置 `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN` 到你的中转地址（同样放在 shell 环境或 Claude Code settings 的 `env` 里）。
 - 示例（写进 `~/.claude/settings.json` 的 `env` 对象，或你的 shell profile）：
   ```json
-  { "env": { "ANTHROPIC_BASE_URL": "https://your-gateway.example", "ANTHROPIC_AUTH_TOKEN": "<你的令牌>", "ANTHROPIC_MODEL": "deepseek-flash" } }
+  {
+    "env": {
+      "ANTHROPIC_BASE_URL": "https://your-gateway.example",
+      "ANTHROPIC_AUTH_TOKEN": "<你的令牌>",
+      "ANTHROPIC_MODEL": "deepseek-flash"
+    }
+  }
   ```
 - 修改后在本机终端跑一次 `claude -p "hi"` 验证生效，再回到 Zotero 继续对话。
 - 插件不读取、不存储这些凭证；它们始终在你自己的 CLI 配置里。

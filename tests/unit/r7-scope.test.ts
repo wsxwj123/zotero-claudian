@@ -87,7 +87,9 @@ function depsOf(
     /** 像 Zotero 的 getChildItems(recursive) 一样：只有递归为真才带上子分类 */
     listCollection: async (id: string, opts: { recursive?: boolean }) => {
       state.collectionCalls.push({ id, opts: opts ?? {} });
-      return opts?.recursive ? [...candidates, ...(over.sub ?? [])] : candidates;
+      return opts?.recursive
+        ? [...candidates, ...(over.sub ?? [])]
+        : candidates;
     },
     listSelected: async () => {
       state.selectedCalls += 1;
@@ -125,7 +127,10 @@ test("R7-D 过滤：全是附件/笔记 → 空清单、不抛、truncated:false
     { itemKey: "ATT", regular: false },
     { itemKey: "NOTE", regular: false },
   ]);
-  const res = await resolveScope({ kind: "selection", label: "选中条目" }, deps);
+  const res = await resolveScope(
+    { kind: "selection", label: "选中条目" },
+    deps,
+  );
   assert.deepEqual(res.items, []);
   assert.equal(res.truncated, false);
 });
@@ -135,7 +140,10 @@ test("R7-D 过滤：条目在 Zotero 侧已删（resolveItem 回 null）→ 跳�
     { itemKey: "A1", regular: true },
     { itemKey: "GONE", regular: true },
   ]);
-  const res = await resolveScope({ kind: "selection", label: "选中条目" }, deps);
+  const res = await resolveScope(
+    { kind: "selection", label: "选中条目" },
+    deps,
+  );
   assert.deepEqual(
     res.items.map((r) => r.itemKey),
     ["A1"],
@@ -172,7 +180,13 @@ test("R7-D 上限：正好 40 条 → truncated:false（边界不多不少）", 
 test("R7-D 上限：附件/笔记不占额度（30 条文献 + 20 条附件 → 30 条、不截断）", async () => {
   const res = await resolveScope(
     { kind: "selection", label: "选中条目" },
-    depsOf([...regular(30), ...Array.from({ length: 20 }, (_, i) => ({ itemKey: `ATT${i}`, regular: false }))]),
+    depsOf([
+      ...regular(30),
+      ...Array.from({ length: 20 }, (_, i) => ({
+        itemKey: `ATT${i}`,
+        regular: false,
+      })),
+    ]),
   );
   assert.equal(res.items.length, 30);
   assert.equal(res.truncated, false);
@@ -210,7 +224,10 @@ test("R7-D 分类模式：不含子分类（递归开关恒关，子分类条目
 
 test("R7-D 选中模式：用选中集，且不碰分类", async () => {
   const deps = depsOf(regular(2, "SEL"));
-  const res = await resolveScope({ kind: "selection", label: "选中条目" }, deps);
+  const res = await resolveScope(
+    { kind: "selection", label: "选中条目" },
+    deps,
+  );
   assert.equal(res.kind, "selection");
   assert.equal(deps.selectedCalls, 1);
   assert.equal(deps.collectionCalls.length, 0, "选中模式不该去查分类");
@@ -226,11 +243,24 @@ test("R7-D 形态：scopeResolved 回执字段齐备（kind / label / items / tr
     depsOf(regular(1)),
   );
   for (const field of ["kind", "label", "items", "truncated"] as const) {
-    assert.notEqual((res as Record<string, unknown>)[field], undefined, `缺字段 ${field}`);
+    assert.notEqual(
+      (res as Record<string, unknown>)[field],
+      undefined,
+      `缺字段 ${field}`,
+    );
   }
   assert.equal(typeof res.label, "string");
   assert.ok(res.label.length > 0, "label 不能是空串（chip 要显示）");
-  for (const field of ["itemKey", "title", "creators", "year", "doi", "pdfPath", "pdfDir", "attachmentKey"]) {
+  for (const field of [
+    "itemKey",
+    "title",
+    "creators",
+    "year",
+    "doi",
+    "pdfPath",
+    "pdfDir",
+    "attachmentKey",
+  ]) {
     assert.notEqual(
       (res.items[0] as unknown as Record<string, unknown>)[field],
       undefined,
@@ -240,12 +270,15 @@ test("R7-D 形态：scopeResolved 回执字段齐备（kind / label / items / tr
 });
 
 test("R7-D 稳健：取数抛错 → 回执仍成形（不把整轮发送打崩）", async () => {
-  const res = await resolveScope({ kind: "selection", label: "选中条目" }, {
-    resolveItem: async () => {
-      throw new Error("Zotero 内部形态变化");
+  const res = await resolveScope(
+    { kind: "selection", label: "选中条目" },
+    {
+      resolveItem: async () => {
+        throw new Error("Zotero 内部形态变化");
+      },
+      listSelected: async () => regular(2),
     },
-    listSelected: async () => regular(2),
-  });
+  );
   assert.ok(Array.isArray(res.items));
   assert.equal(typeof res.truncated, "boolean");
 });
@@ -300,7 +333,11 @@ test("R7-D 区块：条目从 1 起编号，一条一行", () => {
 
 test("R7-D 区块：摘要截到 300 字符（第 301 字符起不得出现）", () => {
   const block = buildScopeBlock(SCOPE);
-  assert.equal(SCOPE_ABSTRACT_MAX, 300, "范围摘要上限 300（PLAN §3.6，比 @ 的 500 更狠）");
+  assert.equal(
+    SCOPE_ABSTRACT_MAX,
+    300,
+    "范围摘要上限 300（PLAN §3.6，比 @ 的 500 更狠）",
+  );
   assert.ok(block.includes("A".repeat(300)), "前 300 字符要在");
   assert.ok(!block.includes("ZZZ"), "超出部分必须截掉（量大要控 token）");
 });
@@ -321,7 +358,11 @@ test("R7-D 区块：作者缺失 / DOI 缺失 → 不产出 null/undefined 字�
   assert.ok(!/null|undefined/.test(block), `出现了空值字样：\n${block}`);
 
   const many = buildScopeBlock(SCOPE);
-  assert.ok(many.includes("Vaswani") && many.includes("Shazeer") && many.includes("Parmar"));
+  assert.ok(
+    many.includes("Vaswani") &&
+      many.includes("Shazeer") &&
+      many.includes("Parmar"),
+  );
   assert.ok(!many.includes("Uszkoreit"), "第 4 位作者不上屏");
 });
 
@@ -438,13 +479,22 @@ test("R7-D add-dir：空集合 → 空数组（无附件、无 chip、无范围�
 
 test("R7-D 安全红线：范围模式的 40 个目录逐目录都有 deny（扩权不得削弱 PDF 写保护）", () => {
   // §3.6：add-dir 与 deny 同步扩展；40 个目录 → 每个目录各 Write/Edit 两条，共 80 条，一条不少
-  const scopeDirs = Array.from({ length: SCOPE_ITEMS_MAX }, (_, i) => `/lib/storage/S${i}`);
+  const scopeDirs = Array.from(
+    { length: SCOPE_ITEMS_MAX },
+    (_, i) => `/lib/storage/S${i}`,
+  );
   const dirs = mergeScopeAddDirs(null, [], scopeDirs);
   assert.equal(dirs.length, SCOPE_ITEMS_MAX);
   const rules = JSON.parse(buildAttachmentDenySettings(dirs)).permissions.deny;
   assert.equal(rules.length, dirs.length * 2);
   for (const dir of dirs) {
-    assert.ok(rules.includes(`Write(//${dir.slice(1)}/**)`), `缺 ${dir} 的 Write 拒绝`);
-    assert.ok(rules.includes(`Edit(//${dir.slice(1)}/**)`), `缺 ${dir} 的 Edit 拒绝`);
+    assert.ok(
+      rules.includes(`Write(//${dir.slice(1)}/**)`),
+      `缺 ${dir} 的 Write 拒绝`,
+    );
+    assert.ok(
+      rules.includes(`Edit(//${dir.slice(1)}/**)`),
+      `缺 ${dir} 的 Edit 拒绝`,
+    );
   }
 });

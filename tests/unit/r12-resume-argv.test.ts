@@ -45,13 +45,7 @@ test("R12 argv：空串 = 无 resume（既有 falsy 语义，不抛也不带参�
 });
 
 test("R12 argv：路径上跳/分隔符/空白/超长的 id 必须抛错", () => {
-  for (const bad of [
-    "../../etc/passwd",
-    "a/b",
-    "a\\b",
-    " ",
-    "a".repeat(65),
-  ]) {
+  for (const bad of ["../../etc/passwd", "a/b", "a\\b", " ", "a".repeat(65)]) {
     assert.throws(
       () => buildSpawnArgs(opts({ resumeClaudeSessionId: bad })),
       /invalid resumeClaudeSessionId/,
