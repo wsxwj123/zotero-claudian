@@ -1,5 +1,7 @@
 # zotero-claudian
 
+[→ 安装教程](#安装)
+
 **在 Zotero 里内置一个 Claude Code 工作台**：读文献时直接在阅读器右侧栏（或独立标签页）里和 Claude 对话——它自动知道你在读哪篇、哪页、划了什么，能调用你本机 Claude Code 的全部工具与技能分析文献，回答可一键存进 Zotero 笔记。
 
 > 本插件把本机已安装的 [Claude Code](https://claude.com/claude-code) CLI 接进 Zotero。它**不是**又一个"填 API key 聊天"的插件：对话跑在你本机的 `claude` 进程里，用你已配置好的模型服务商、MCP、技能与权限体系。
@@ -32,6 +34,7 @@
 - **Zotero 7 或更高**（macOS 与 Windows；**兼容区间已放宽到 `6.999 – 99.*`，Zotero 后续版本升级不会再把你挡在门外**）。Zotero 9 经完整真机验证，Zotero 10 经真机加载与全链路自验，7/8 未真机验证
 - **本机已安装并登录 Claude Code CLI**（`claude` 命令可用、`claude auth status` 显示已登录）。
   安装见 [Claude Code 官方文档](https://claude.com/claude-code)。插件不代装、不管理账号。
+- **使用第三方 Provider（非官方登录）时**：需提前用 `cc switch` 或本项目配套的 ccgui 配置好路由，且**对话期间必须让该路由程序保持后台运行**——关掉路由，第三方 provider 会立即不可用。
 
 ## 安装
 
