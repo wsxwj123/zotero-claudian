@@ -35,6 +35,8 @@ export const DIAG_KEYS = [
   "platform",
   "cli",
   "cli.auth",
+  // R15：候选清单（本机找到的 claude 都在哪——报障时看它）
+  "cli.candidates",
   "workspace",
   "collection",
   "reader",

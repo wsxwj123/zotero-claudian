@@ -15,15 +15,46 @@ export type Platform = "darwin" | "win32" | "linux";
  */
 export type CliChannel = "direct" | "cmd" | "sh";
 
+/** 候选来源标签（R15 扩了 "npm-prefix"；既有四个取值语义不变） */
+export type CliSource =
+  "override" | "path" | "registry" | "npm-prefix" | "resident";
+
 /** 命令发现结果：found（direct=argv 直传 / cmd=经 cmd.exe 派发）或 not_found */
 export type ResolveCommandResult =
   | {
       status: "found";
       channel: CliChannel;
       path: string;
-      source: "override" | "path" | "registry" | "resident";
+      source: CliSource;
     }
   | { status: "not_found"; error: "CLAUDE_NOT_FOUND" };
+
+/**
+ * R15 F1：一个候选（枚举器产出；`pickClaudeCandidate` 从中挑首个过门者）。
+ * `sizeOk` = 廉价体积门结论（.exe 未注入 fileSize 时恒 true；.cmd 恒 true）。
+ */
+export interface CliCandidate {
+  /** 可执行入口绝对路径（direct=该文件即被 spawn；cmd=经 cmd.exe 派发该 .cmd） */
+  path: string;
+  channel: CliChannel;
+  source: CliSource;
+  sizeOk: boolean;
+  /** 诊断短标识：`PATH[3]` / `registry[0]` / `npm-prefix[1]` / `resident[2]` / `override` */
+  via: string;
+}
+
+export interface CandidateScan {
+  /** 按解析序；不过体积门的候选**保留在列**（排在过门者之后由 pick 处理） */
+  candidates: CliCandidate[];
+}
+
+/** R15 F1：候选枚举输入 = ResolveCommandEnv + npm prefix 目录 + 可选 mtime 注入 */
+export interface CandidateEnv extends ResolveCommandEnv {
+  /** npm 全局 prefix 目录（resolveNpmPrefixDirs 产物）；win32 专用，其它平台忽略 */
+  npmPrefixDirs?: string[];
+  /** 可选：文件 mtime（ms）——只用于**同 source 桶内**并列候选的「更新者优先」排序 */
+  mtimeMs?: (p: string) => number | null;
+}
 
 /**
  * win32 npm .cmd 壳 → 包内真实 exe 的探测路径。
@@ -31,7 +62,7 @@ export type ResolveCommandResult =
  * ——package.json 的 `bin` 字段就是 `bin/claude.exe`（install.cjs 注释「Always write to
  * bin/claude.exe」，同一 tarball 三平台共用布局）。此前漏了 `bin` 段 → win32 上恒探不到，
  * 「优先走包内 exe」的设计路径从未成立，永远落回 .cmd 通道。
- * 包内 exe 的有效性靠数值门（MIN_PKG_EXE_BYTES）+ 真机验收，不靠路径猜测。
+ * 包内 exe 的有效性靠数值门（MIN_CLI_EXE_BYTES）+ 真机验收，不靠路径猜测。
  */
 const NPM_PKG_EXE_SEGMENTS = [
   "node_modules",
@@ -41,8 +72,11 @@ const NPM_PKG_EXE_SEGMENTS = [
   "claude.exe",
 ];
 
-/** 包内 exe 有效性下限：≥5MB，防下载中断残缺文件（PLAN §2.10 A；fileSize 未注入则只查存在性） */
-const MIN_PKG_EXE_BYTES = 5 * 1024 * 1024;
+/**
+ * 可执行文件有效性下限：≥5MB——防下载中断/被杀软隔离的残缺文件被选中（PLAN §2.10 A）。
+ * R15 F2 把它从「包内 exe 专用」泛化为**所有 .exe 候选**共用；fileSize 未注入时门恒过。
+ */
+const MIN_CLI_EXE_BYTES = 5 * 1024 * 1024;
 
 export interface ResolveCommandEnv {
   platform: Platform;
@@ -67,55 +101,161 @@ export interface ResolveCommandEnv {
  *   .cmd 命中先解析包内 claude.exe（direct 通道），解析失败落 .cmd 壳（cmd 通道）；
  * - override 非空且存在 → 直接采用，不查 PATH；不存在 → 回落自动解析（INTERFACE §4.4）。
  */
-export function resolveClaudeCommand(
-  env: ResolveCommandEnv,
-): ResolveCommandResult {
+/**
+ * R15 F1：候选全集（按解析序）。**只产候选，不挑选、不探测**——挑选见 pickClaudeCandidate，
+ * 健康实测在宿主（sections.ts）。
+ * - override 存在时是**唯一**候选（用户显式指定最高优先，不参与任何排序）；
+ * - win32 四桶：进程 PATH → 注册表实时 PATH → npm 全局 prefix → 常驻目录；桶内逐目录
+ *   `claude.exe` → `claude.cmd`（同目录 .exe 优先，既有语义）；.cmd 能解析出包内 exe 时
+ *   产出 direct 候选（解析不出才落 cmd 候选）；
+ * - darwin/linux：pathDirs → residentDirs，命令名恒为 claude（与旧实现逐字同序）。
+ * 不注入 npmPrefixDirs / mtimeMs 时，产出与旧 resolveClaudeCommand 的首个命中完全一致。
+ */
+export function scanClaudeCandidates(env: CandidateEnv): CandidateScan {
+  const out: CliCandidate[] = [];
   if (env.override && env.exists(env.override)) {
     if (env.platform === "win32" && isCmdShell(env.override)) {
       const pkg = resolvePkgExe(env, dirOf(env.override));
-      if (pkg) return found("direct", pkg, "override");
-      return found("cmd", env.override, "override");
+      out.push(
+        pkg
+          ? candidate("direct", pkg, "override", "override", env)
+          : candidate("cmd", env.override, "override", "override", env),
+      );
+    } else {
+      out.push(candidate("direct", env.override, "override", "override", env));
     }
-    return found("direct", env.override, "override");
+    return { candidates: out };
   }
 
   if (env.platform === "win32") {
-    const sources: Array<[string[], "path" | "registry" | "resident"]> = [
+    const buckets: Array<[string[], CliSource]> = [
       [env.pathDirs, "path"],
       [env.registryPathDirs ?? [], "registry"],
+      [env.npmPrefixDirs ?? [], "npm-prefix"],
       [env.residentDirs ?? [], "resident"],
     ];
-    for (const [dirs, source] of sources) {
-      for (const dir of dirs) {
+    for (const [dirs, source] of buckets) {
+      const bucket: CliCandidate[] = [];
+      for (const [i, dir] of dirs.entries()) {
+        const via = `${source}[${i}]`;
         const exe = joinPath("win32", dir, "claude.exe");
         if (env.exists(exe)) {
-          return found("direct", exe, source);
+          bucket.push(candidate("direct", exe, source, via, env));
         }
         const cmdShell = joinPath("win32", dir, "claude.cmd");
         if (env.exists(cmdShell)) {
           const pkg = resolvePkgExe(env, dir);
-          if (pkg) return found("direct", pkg, source);
-          return found("cmd", cmdShell, source);
+          bucket.push(
+            pkg
+              ? candidate("direct", pkg, source, via, env)
+              : candidate("cmd", cmdShell, source, via, env),
+          );
         }
       }
+      // REVIEW-R15 致命-1：mtime 重排只用于 resident / npm-prefix 桶——PATH 里的顺序是
+      // 用户环境语义（验收锁定「严格 PATH 序」），不允许按新旧重排
+      out.push(
+        ...(source === "resident" || source === "npm-prefix"
+          ? sortBucketByRecency(bucket, env)
+          : bucket),
+      );
     }
-    return { status: "not_found", error: "CLAUDE_NOT_FOUND" };
+    return { candidates: out };
   }
 
   // darwin / linux：POSIX 命令名恒为 claude，argv 直传
-  for (const dir of env.pathDirs) {
-    const candidate = joinPath(env.platform, dir, "claude");
-    if (env.exists(candidate)) {
-      return found("direct", candidate, "path");
+  const posix: Array<[string[] | undefined, CliSource]> = [
+    [env.pathDirs, "path"],
+    [env.residentDirs, "resident"],
+  ];
+  for (const [dirs, source] of posix) {
+    const bucket: CliCandidate[] = [];
+    for (const [i, dir] of (dirs ?? []).entries()) {
+      const p = joinPath(env.platform, dir, "claude");
+      if (env.exists(p)) {
+        bucket.push(candidate("direct", p, source, `${source}[${i}]`, env));
+      }
+    }
+    // darwin/linux：resident 兜底表内才允许按新旧重排（PATH 序同 win32 口径，锁死不动）
+    out.push(
+      ...(source === "resident" ? sortBucketByRecency(bucket, env) : bucket),
+    );
+  }
+  return { candidates: out };
+}
+
+/**
+ * R15 F2：挑选——首个**过体积门**的候选；全军覆没时回落到第一个存在的候选（fail-open）。
+ * fail-open 是刻意的：体积门只是「防残壳」的廉价启发，宁可让一个可疑候选去试（宿主还会
+ * `--version` 实测、失败自动推进下一个候选），也不能因为门太严把唯一能跑的装成找不到
+ * （PLAN-R15 §9 风险 1：修出新的假阴性比病因更坏）。
+ */
+export function pickClaudeCandidate(scan: CandidateScan): CliCandidate | null {
+  return scan.candidates.find((c) => c.sizeOk) ?? scan.candidates[0] ?? null;
+}
+
+/**
+ * 命令发现（对外契约不变：既有验收锁定的 path/channel/source 三元组逐字保留）。
+ * R15 起是 scan + pick 的薄包装；不复核健康（那是宿主 probeCliStatus 的事）。
+ */
+export function resolveClaudeCommand(
+  env: ResolveCommandEnv,
+): ResolveCommandResult {
+  const hit = pickClaudeCandidate(scanClaudeCandidates(env));
+  return hit
+    ? {
+        status: "found",
+        channel: hit.channel,
+        path: hit.path,
+        source: hit.source,
+      }
+    : { status: "not_found", error: "CLAUDE_NOT_FOUND" };
+}
+
+/** 造一个候选（体积门：.exe 且注入 fileSize 且 < 门限 → sizeOk=false；其余恒 true） */
+function candidate(
+  channel: CliChannel,
+  path: string,
+  source: CliSource,
+  via: string,
+  env: CandidateEnv,
+): CliCandidate {
+  // 门语义（REVIEW-R15 重要-4 统一口径）：拿不到体积（未注入 / 抛错 / 非有限数）→ 放过；
+  // 只有「明确小于门限」才判不过（fail-open：门是防残壳的启发，不是准入的硬闸）
+  let sizeOk = true;
+  if (/\.exe$/i.test(path) && env.fileSize) {
+    try {
+      const size = env.fileSize(path);
+      sizeOk = !Number.isFinite(size) || size >= MIN_CLI_EXE_BYTES;
+    } catch {
+      sizeOk = true;
     }
   }
-  for (const dir of env.residentDirs ?? []) {
-    const candidate = joinPath(env.platform, dir, "claude");
-    if (env.exists(candidate)) {
-      return found("direct", candidate, "resident");
-    }
+  return { path, channel, source, sizeOk, via };
+}
+
+/** 同 source 桶内并列候选：注入了 mtime 时「更新者优先」（稳定排序）；未注入保持原序 */
+function sortBucketByRecency(
+  bucket: CliCandidate[],
+  env: CandidateEnv,
+): CliCandidate[] {
+  const mtimeOf = env.mtimeMs;
+  if (!mtimeOf || bucket.length < 2) {
+    return bucket;
   }
-  return { status: "not_found", error: "CLAUDE_NOT_FOUND" };
+  return bucket
+    .map((c, i) => ({ c, i, t: numberedOrZero(mtimeOf, c.path) }))
+    .sort((a, b) => b.t - a.t || a.i - b.i)
+    .map((x) => x.c);
+}
+
+function numberedOrZero(fn: (p: string) => number | null, p: string): number {
+  try {
+    const v = fn(p);
+    return typeof v === "number" && Number.isFinite(v) ? v : 0;
+  } catch {
+    return 0;
+  }
 }
 
 function found(
@@ -141,7 +281,7 @@ function resolvePkgExe(env: ResolveCommandEnv, cmdDir: string): string | null {
   if (!env.exists(pkgExe)) {
     return null;
   }
-  if (env.fileSize && env.fileSize(pkgExe) < MIN_PKG_EXE_BYTES) {
+  if (env.fileSize && env.fileSize(pkgExe) < MIN_CLI_EXE_BYTES) {
     return null;
   }
   return pkgExe;
@@ -323,7 +463,11 @@ export type CliStatusCode =
   | "CLAUDE_NOT_FOUND"
   | "CLAUDE_AUTH_FAILED"
   | "CLAUDE_VERSION_TOO_OLD"
-  | "CLI_PATH_OVERRIDE_INVALID";
+  | "CLI_PATH_OVERRIDE_INVALID"
+  /** R15 F7：首次运行被安全软件/冷启动拖过探测超时（会自动重试，不是装坏了） */
+  | "CLAUDE_PROBE_TIMEOUT"
+  /** R15 F7：明确不可执行（非零退出 / spawn 拒收）——带原文原因 */
+  | "CLAUDE_EXEC_FAILED";
 
 /** CLI 检测结论（宿主推 UI 横幅的依据） */
 export interface CliStatus {
@@ -342,8 +486,16 @@ export interface CliProbeFacts {
   override: string;
   /** override 非空时的存在性检查结果 */
   overrideExists: boolean;
-  /** `--version` 结果；null = 未探测（前置步骤已失败） */
-  version: { major: number } | { failed: true } | null;
+  /**
+   * `--version` 结果；null = 未探测（前置步骤已失败）。
+   * R15 F7：超时与真失败**分开**——超时（多为安全软件冷扫描）不代表装坏了，
+   * 文案与错误码都必须区别于「不可执行」，不许劝重装。
+   */
+  version:
+    | { major: number }
+    | { failed: true; reason?: string }
+    | { timedOut: true }
+    | null;
   /** auth status 可判定结果；null = 未探测/不可判定 */
   auth: { loggedIn: boolean } | null;
 }
@@ -361,14 +513,26 @@ export function evaluateCliStatus(facts: CliProbeFacts): CliStatus {
     return {
       ok: false,
       code: "CLAUDE_NOT_FOUND",
-      message: `未找到 claude 命令。请安装 Claude Code（${CLAUDE_INSTALL_URL}），装好后重启 Zotero；或在 设置 → zotero-claudian 中填写 claude 可执行文件完整路径。${overrideNote}`,
+      message: `未找到 claude 命令。请安装 Claude Code（${CLAUDE_INSTALL_URL}），装好后重开本面板即可生效（无需重启 Zotero）；或在 设置 → zotero-claudian 中填写 claude 可执行文件完整路径。${overrideNote}`,
+    };
+  }
+  // R15 F7：超时 ≠ 装坏了——首次执行大文件被杀软扫描/冷启动拖慢，给正确归因与下一步，
+  // 不得出现「安装完整/重新安装」这类劝重装措辞（宿主已安排在 15 秒后自动重试一次）
+  if (facts.version && "timedOut" in facts.version) {
+    return {
+      ok: false,
+      code: "CLAUDE_PROBE_TIMEOUT",
+      message: `claude 首次运行较慢，探测超时（${facts.resolvedPath}）。常见于系统安全软件正在扫描该程序，通常在数秒内自动恢复——已安排在 15 秒后自动重试，也可以直接发消息（会再次尝试）；若持续出现，可用 /diag 查看候选清单。${overrideNote}`,
     };
   }
   if (facts.version && "failed" in facts.version) {
+    const reason = facts.version.reason
+      ? `原因：${facts.version.reason}。`
+      : "";
     return {
       ok: false,
-      code: "CLAUDE_NOT_FOUND",
-      message: `claude 无法执行（${facts.resolvedPath}）。请确认安装完整，或在 设置 → zotero-claudian 中重新指定可执行文件路径。${overrideNote}`,
+      code: "CLAUDE_EXEC_FAILED",
+      message: `claude 无法执行（${facts.resolvedPath}）。${reason}请检查该文件是否被安全软件隔离/未下载完整，或在 设置 → zotero-claudian 中重新指定可执行文件路径；/diag 可查看本机全部候选。${overrideNote}`,
     };
   }
   if (facts.version && "major" in facts.version && facts.version.major < 2) {

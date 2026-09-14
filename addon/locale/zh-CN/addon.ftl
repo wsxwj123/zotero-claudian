@@ -31,6 +31,7 @@ prefs-cli-label = claude 可执行文件路径
 prefs-cli-hint-empty = 留空 = 自动查找（PATH 与常见安装位置）
 prefs-cli-hint-ok = 路径有效
 prefs-cli-hint-missing = 路径不存在：将回落自动解析，并在对话页顶部给出提示
+prefs-cli-hint-suspicious = 路径存在，但该文件体积异常偏小（可能未下载完整或被安全软件隔离）：建议重新安装，或指向另一份 claude
 prefs-usage-label = 显示用量/余额
 prefs-usage-hint = 在对话页顶栏显示 token 用量与缓存命中率；provider 为 DeepSeek 且填了 Key 时同时显示账户余额。关闭 = 不查询也不显示余额（不会向 api.deepseek.com 发请求）
 prefs-deepseek-label = DeepSeek API Key

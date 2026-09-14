@@ -42,6 +42,9 @@ export interface BalanceStatus {
 export type BridgeErrorCode =
   | "CLAUDE_NOT_FOUND"
   | "CLAUDE_AUTH_FAILED"
+  // R15：探测超时（会自动重试）与明确不可执行——与 cliDetect.CliStatusCode 对齐
+  | "CLAUDE_PROBE_TIMEOUT"
+  | "CLAUDE_EXEC_FAILED"
   | "WORKSPACE_UNAVAILABLE"
   | "SPAWN_FAILED"
   | "SESSION_BUSY"
@@ -159,7 +162,32 @@ export type HostMessage =
   | {
       type: "history";
       sessionId: string;
-      messages: { role: "user" | "assistant"; text: string; ts: number }[];
+      messages: {
+        role: "user" | "assistant";
+        text: string;
+        ts: number;
+        /** R14：assistant 行的过程块（旧宿主/旧文件不带，UI 行为逐字不变） */
+        blocks?: (
+          | { blockType: "thinking"; text: string }
+          | {
+              blockType: "tool";
+              toolName: string;
+              inputJson: string;
+              result: { isError: boolean; summary: string } | null;
+            }
+        )[];
+      }[];
+      /**
+       * R14：该会话当前在途轮（宿主是唯一真相）。两个下发时机：换绑定时 handleGetHistory 的
+       * 回执、开轮时 handleSend 的广播。缺省 = 无在途轮（老宿主不带该键，UI 行为逐字不变）。
+       */
+      inFlight?: {
+        userText: string;
+        assistantText: string;
+        busy: "running" | "interrupting";
+        /** 宿主接轮时该会话已落盘的历史行数（幂等键：回放行数 <= baseRows = 这轮还没落盘） */
+        baseRows: number;
+      };
     }
   /**
    * 输入历史（↑/↓ 翻已发送消息）的持久化回推：宿主落盘 <profile>/claudian/input-history.json，

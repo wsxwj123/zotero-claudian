@@ -1,8 +1,8 @@
 // 单测 — R9「/diag 诊断报告」纯逻辑（src/utils/diag.ts）。
 //
 // 锁定的契约点（PLAN-R9）：
-//   1) 报告 = 固定首行 + 15 行 `标签: 值`（标签补空格对齐，值在固定列开始；
-//      15 = 原 14 行 + R11 复查新增的 history 行——行数断言一律走 DIAG_KEYS.length）
+//   1) 报告 = 固定首行 + N 行 `标签: 值`（标签补空格对齐，值在固定列开始；
+//      N = DIAG_KEYS.length（R9 起原 14 + R11 的 history + R15 的 cli.candidates）
 //   2) 缺字段 → `(error: 未采集)`；采集失败（{error}）→ `(error: 原因)`，整份报告照出
 //   3) 脱敏：疑似 secret 的键名（key/token/secret/…）只写 set/unset；
 //      且报告**只打印白名单里的行**——输入里夹带的任何其它键（含 DeepSeek Key、
@@ -33,6 +33,8 @@ function fullInput(): Record<string, unknown> {
     platform: "win32 / x86_64",
     cli: "command=C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd channel=cmd version=2.0.14 (Claude Code)",
     "cli.auth": "ok",
+    // R15：候选清单行（路径/来源/体积门；超预算先丢候选保尾巴）
+    "cli.candidates": "[0]path=C:\\Users\\me\\.local\\bin\\claude.exe 共 1 条",
     workspace: "mode=single path=C:\\Users\\me\\ws exists=true writable=true",
     collection: "(none)",
     reader: "itemKey=ABCD1234 attachmentKey=EFGH5678 hasParent=true",
@@ -83,6 +85,8 @@ test("R9-diag 报告：行顺序与白名单一致，且没有多余行", () => 
       "platform",
       "cli",
       "cli.auth",
+      // R15：候选清单行（插在 cli.auth 之后）
+      "cli.candidates",
       "workspace",
       "collection",
       "reader",
@@ -154,6 +158,10 @@ test("R9-diag 脱敏：redactValue —— 疑似 secret 的键只给 set/unset�
   );
   // cli.auth 不被 secret 规则误伤（裸 auth 不算凭据词）
   assert.match(bodyLines(buildDiagReport(fullInput()))[5], /^cli\.auth: +ok$/);
+  assert.match(
+    bodyLines(buildDiagReport(fullInput()))[6],
+    /^cli\.candidates: +/,
+  );
 });
 
 test("R9-diag 报告：超长值截断（保留前缀 + 省略号），多行值压成一行", () => {
@@ -172,7 +180,7 @@ test("R9-diag 报告：超长值截断（保留前缀 + 省略号），多行值
   });
   assert.equal(multiline.split("\n").length, DIAG_KEYS.length + 1);
   assert.match(
-    bodyLines(multiline)[6],
+    bodyLines(multiline)[7],
     /^workspace: +mode=single path=\/w exists=true$/,
   );
 });
@@ -192,10 +200,10 @@ test("R9-diag 报告：值与形态原样透传（win32/darwin、single/collecti
   assert.match(winLines[4], /channel=cmd version=timeout$/);
   assert.match(winLines[5], /^cli\.auth: +not-logged-in$/);
   assert.match(
-    winLines[6],
+    winLines[7],
     /^workspace: +mode=collection path=D:\\ws exists=true writable=false$/,
   );
-  assert.match(winLines[7], /^collection: +机器学习-classic$/);
+  assert.match(winLines[8], /^collection: +机器学习-classic$/);
 
   // darwin（sh 包装通道）+ single 模式 + 工作区不存在
   const mac = buildDiagReport({
@@ -211,8 +219,8 @@ test("R9-diag 报告：值与形态原样透传（win32/darwin、single/collecti
     macLines[4],
     /^cli: +command=\/opt\/homebrew\/bin\/claude channel=sh version=2\.0\.14 \(Claude Code\)$/,
   );
-  assert.match(macLines[6], /exists=false writable=false$/);
-  assert.match(macLines[7], /^collection: +\(none\)$/);
+  assert.match(macLines[7], /exists=false writable=false$/);
+  assert.match(macLines[8], /^collection: +\(none\)$/);
 });
 
 test("R9-diag 报告：session/sessionFile/snapshots/journal 的空态写 (none)/false，不写假值", () => {
@@ -229,15 +237,15 @@ test("R9-diag 报告：session/sessionFile/snapshots/journal 的空态写 (none)
   );
   assert.match(lines[4], /^cli: +command=未找到 channel=none version=none$/);
   assert.match(
-    lines[8],
+    lines[9],
     /^reader: +itemKey=\(none\) attachmentKey=\(none\) hasParent=false$/,
   );
   assert.match(
-    lines[9],
+    lines[10],
     /^session: +current=\(none\) claudeSessionId=\(none\)$/,
   );
-  assert.match(lines[10], /^sessionFile: +found=false via=none dir=\(none\)$/);
-  assert.match(lines[12], /^snapshots: +dir=\(none\) count=0 lastTurn=none$/);
+  assert.match(lines[11], /^sessionFile: +found=false via=none dir=\(none\)$/);
+  assert.match(lines[13], /^snapshots: +dir=\(none\) count=0 lastTurn=none$/);
 });
 
 test("R9-diag 报告：formatDiagLine 是唯一行格式入口（同一输入 → 同一行）", () => {

@@ -12,6 +12,7 @@ export type FluentMessageId =
   | 'prefs-cli-hint-empty'
   | 'prefs-cli-hint-missing'
   | 'prefs-cli-hint-ok'
+  | 'prefs-cli-hint-suspicious'
   | 'prefs-cli-label'
   | 'prefs-deepseek-hint-empty'
   | 'prefs-deepseek-hint-set'

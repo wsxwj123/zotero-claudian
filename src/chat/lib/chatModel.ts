@@ -513,7 +513,7 @@ export function reduceHostMessage(
       ) {
         return state;
       }
-      return reduceHistory(state, msg.messages);
+      return reduceHistory(state, msg.messages, msg.inFlight);
     case "inputHistory": {
       // 输入历史（↑/↓ 翻已发送消息）的宿主回推：与 history/usageStats 同口径——只管当前绑定会话的
       // （多实例广播，各看各的）；entries 归一（非字符串/缺字段一律丢，坏输入不崩）。
@@ -963,10 +963,104 @@ function normalizeNoteList(raw: unknown): NoteSummary[] {
   return out;
 }
 
+/** R14 修点 1：history 回执携带的「该会话现在在跑什么」（宿主组装；缺省 = 无在途轮） */
+export interface InFlightInfo {
+  userText: string;
+  assistantText: string;
+  busy: "running" | "interrupting";
+  /** 宿主接轮时该会话已落盘的历史行数（幂等键：回放行数 <= baseRows = 这一轮还没落盘） */
+  baseRows: number;
+}
+
+/** inFlight 载荷长度上限（防坏值灌爆视图；与宿主侧同口径） */
+const IN_FLIGHT_USER_MAX = 4000;
+const IN_FLIGHT_ASSISTANT_MAX = 8000;
+
+/**
+ * R14：inFlight 归一——非对象 / userText 非字符串或空 / busy 不在白名单 → 整条当「无 inFlight」
+ * （老宿主行为逐字不变）；文本按上限截断，baseRows 非有限或负数 → 0。
+ */
+function normalizeInFlight(value: unknown): InFlightInfo | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const userText = typeof raw.userText === "string" ? raw.userText : "";
+  if (!userText) {
+    return null;
+  }
+  const busy =
+    raw.busy === "running" || raw.busy === "interrupting" ? raw.busy : null;
+  if (busy === null) {
+    return null;
+  }
+  const assistantText =
+    typeof raw.assistantText === "string"
+      ? raw.assistantText.slice(0, IN_FLIGHT_ASSISTANT_MAX)
+      : "";
+  const baseRows =
+    typeof raw.baseRows === "number" &&
+    Number.isFinite(raw.baseRows) &&
+    raw.baseRows >= 0
+      ? Math.floor(raw.baseRows)
+      : 0;
+  return {
+    userText: userText.slice(0, IN_FLIGHT_USER_MAX),
+    assistantText,
+    busy,
+    baseRows,
+  };
+}
+
+function countUserTurns(turns: Turn[]): number {
+  let n = 0;
+  for (const t of turns) {
+    if (t.role === "user") {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/** 视图末条 user 轮的文本（无 user 轮 → null） */
+function lastUserTurnText(turns: Turn[]): string | null {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === "user") {
+      return turns[i].text ?? "";
+    }
+  }
+  return null;
+}
+
+/** 视图末条 user 轮的下标（无 user 轮 → -1） */
+function lastUserTurnIndex(turns: Turn[]): number {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === "user") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * R14 修点 2：回放合并四条规则（本地优先 + 按轮序号幂等）。两条下发路径（换绑定的
+ * getHistory 回执、修点 4 的开轮广播）共用本函数，判据必须对两种到达都成立：
+ * - R-A 视图底座：本地非空且（回放为空 / 首条同 role 同 text 且本地 user 轮数 ≥ 回放）→
+ *   「已覆盖」，base = local（保住 blocks / 中断轮 / 待重发轮 / 过程条带）；否则
+ *   base = [...turns, ...inFlightTurns(local)]（未覆盖 = 逐字保持 BUG-23/26 行为）。
+ * - R-B 在途轮补不补：有 inFlight 且 turns.length <= baseRows（未落盘）且不是「已覆盖且
+ *   本地末条 user 轮同文」→ 末尾接宿主占位。assistant 占位**必须写成块形态**：纯文本轮会让
+ *   updateLastAssistant 另起一条、calibrateBlocks 不校准 → 正文重复两遍（PLAN-R14 致命-1）。
+ * - R-C 状态位：只有真补了占位且本地 idle 才抬 turnStatus，置 waitingSince、清 lastTurnEnd；
+ *   本地非 idle 一律不动（不打断本地 waiting/streaming/interrupting）。
+ * - R-D 无 inFlight：未覆盖 + idle → 整份替换 + lastTurnEnd={round:-1,end:"ok"}；未覆盖 +
+ *   非 idle → 回放 + 保留在途轮；已覆盖 → 视图原样不动。
+ */
 function reduceHistory(
   state: ChatState,
   messages:
     { role: "user" | "assistant"; text: string; ts: number }[] | unknown,
+  inFlight?: unknown,
 ): ChatState {
   if (!Array.isArray(messages)) {
     return state;
@@ -982,24 +1076,145 @@ function reduceHistory(
     ) {
       continue;
     }
+    if (m.role === "assistant") {
+      // R14 修点 3：带过程块的 assistant 行按块重建（正文以 text 块收尾保住气泡内容）
+      const blocks = replayBlocksOf(m);
+      if (blocks) {
+        turns.push({ role: "assistant", text: m.text, blocks });
+        continue;
+      }
+    }
     turns.push({ role: m.role, text: m.text });
   }
-  // BUG-23/26：回放必须照常应用（否则切过去看不到该会话上下文），但进行中 turn 的在途轮次
-  // 只存在于本视图（宿主 history 里还没有），整份替换会把它抹掉——接在回放之后保留。
-  // 旧实现是「turn 非 idle 就整份丢回放」，切会话后立即发送会丢上下文。
-  const merged =
-    state.turnStatus === "idle"
+  const info = normalizeInFlight(inFlight);
+  const local = state.messages;
+  // R-A：本地已覆盖这份回放 → 本地更全（带 blocks / 待重发轮 / 中断轮），一字不删
+  const covered =
+    local.length > 0 &&
+    (turns.length === 0 ||
+      (turns[0].role === local[0].role &&
+        (turns[0].text ?? "") === (local[0].text ?? "") &&
+        countUserTurns(local) >= countUserTurns(turns)));
+  // R-A/R-D：已覆盖 → 本地一字不动；未覆盖 + idle → 整份替换（现状）；未覆盖 + 非 idle →
+  // 回放 + 保留在途轮（BUG-23/26 现状）。
+  let merged = covered
+    ? local
+    : state.turnStatus === "idle"
       ? turns
-      : [...turns, ...inFlightTurns(state.messages)];
-  return {
-    ...state,
-    messages: merged,
-    // R13：回放轮一律视为「已完成、无错误」——切出去再切回来条带全部收起。`round: -1` 与任何
-    // startIndex 都不匹配（语义即「无匹配轮」，故意不指向具体轮）；在途轮仍归 turnStatus 判，不动。
-    ...(state.turnStatus === "idle"
-      ? { lastTurnEnd: { round: -1, end: "ok" as const } }
-      : {}),
-  };
+      : [...turns, ...inFlightTurns(local)];
+
+  // R-B：宿主在途轮补一次。两个闸：①幂等键 = 行数（turns.length <= baseRows = 还没落盘）；
+  // ②视图末条 user 轮已经就是这一轮且**它不在回放区里**（= 发送方自己的乐观轮 / 先前广播
+  // 补过的占位）→ 不重复补。判据必须同时看「文本相同」与「下标在回放区之外」：
+  // 只看文本会在「连问两次同一句」时把已落盘的那条误判成在途轮（T6d 实跑抓到）；
+  // 不看下标则发送方自己会看到重复轮（26-I1 实跑抓到）。
+  let appended = false;
+  if (
+    info &&
+    turns.length <= info.baseRows &&
+    !(
+      lastUserTurnIndex(merged) >= turns.length &&
+      // 必修（WIN-COMPAT-R14R15）：比较必须与 info.userText 同口径——后者已在归一阶段按
+      // IN_FLIGHT_USER_MAX 截断，本地末条 user 轮是全文；长消息（中文 >4000 字）直接比会
+      // 「不相等」→ 发送方自己视图里多补一条截断副本（重复气泡）。两侧同截断后再比。
+      lastUserTurnText(merged)?.slice(0, IN_FLIGHT_USER_MAX) === info.userText
+    )
+  ) {
+    merged = [...merged, { role: "user", text: info.userText }];
+    if (info.assistantText) {
+      merged = [
+        ...merged,
+        {
+          role: "assistant",
+          blocks: [
+            {
+              blockType: "text",
+              index: 0,
+              text: info.assistantText,
+              streaming: true,
+            },
+          ],
+        },
+      ];
+    }
+    appended = true;
+  }
+
+  const next: ChatState = { ...state, messages: merged };
+  // R-C：只有真补了占位且本地 idle 才抬状态位（本地非 idle 一律不动）
+  if (appended && info && state.turnStatus === "idle") {
+    next.turnStatus =
+      info.busy === "interrupting" ? "interrupting" : "streaming";
+    next.waitingSince = Date.now();
+    next.lastTurnEnd = null;
+    return next;
+  }
+  // R13 现状（逐字保留）：回放后 idle 一律「全部收起」——{round:-1} 与任何轮都不匹配
+  if (state.turnStatus === "idle") {
+    next.lastTurnEnd = { round: -1, end: "ok" };
+  }
+  return next;
+}
+
+/**
+ * R14 修点 3：落盘过程块 → 回放轮的 blocks（index 按数组序补、streaming 恒 false）。
+ * 非法条目逐条跳过；一条都没剩 → null（调用方回落纯文本轮，行为与今天一致）。
+ * 末尾补一个 text 块承载正文：assistantTurnContent 见到非空 blocks 就不再走 markdown 路径。
+ */
+function replayBlocksOf(m: unknown): TurnBlock[] | null {
+  const raw = (m as { blocks?: unknown }).blocks;
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const out: TurnBlock[] = [];
+  for (const b of raw) {
+    if (typeof b !== "object" || b === null) {
+      continue;
+    }
+    const rec = b as Record<string, unknown>;
+    if (
+      rec.blockType === "thinking" &&
+      typeof rec.text === "string" &&
+      rec.text
+    ) {
+      out.push({
+        blockType: "thinking",
+        index: out.length,
+        text: rec.text,
+        streaming: false,
+      });
+      continue;
+    }
+    if (rec.blockType === "tool" && typeof rec.toolName === "string") {
+      const resultRaw = rec.result;
+      const result =
+        typeof resultRaw === "object" &&
+        resultRaw !== null &&
+        typeof (resultRaw as { summary?: unknown }).summary === "string"
+          ? {
+              isError: (resultRaw as { isError?: unknown }).isError === true,
+              summary: (resultRaw as { summary: string }).summary,
+            }
+          : null;
+      out.push({
+        blockType: "tool",
+        index: out.length,
+        toolName: rec.toolName,
+        toolUseId: typeof rec.toolUseId === "string" ? rec.toolUseId : "",
+        inputJson: typeof rec.inputJson === "string" ? rec.inputJson : "",
+        result,
+        streaming: false,
+      });
+    }
+  }
+  const text =
+    typeof (m as { text?: unknown }).text === "string"
+      ? (m as { text: string }).text
+      : "";
+  if (text) {
+    out.push({ blockType: "text", index: out.length, text, streaming: false });
+  }
+  return out.length > 0 ? out : null;
 }
 
 /** 在途 turn 的轮次：末条 user 轮起（含）到结尾——userSend 乐观追加的那轮及其流式产物 */
@@ -1032,7 +1247,11 @@ export function reduceStreamEvent(
   }
   // 记录-06：流事件到达 = 自动重发的那条已被宿主接受（被 SESSION_BUSY 拒的轮不产生任何流事件）
   // → 停止重试。statusDetail 里的「上一轮收尾中…」随之作废，由本事件自己的文案接管。
-  if (state.pendingRetry !== null) {
+  // R14 收窄：只在「自己正处于重发等待（waiting）」时作废——多实例同绑一个会话时，别人那轮的
+  // 流事件不该把我在等重发的这条清掉。依据：pendingRetry 只在 SESSION_BUSY 分支置位（该分支
+  // 强制回 idle，见上），waiting 只由 userSend/fireRetry 置位（userSend 同时清 pendingRetry），
+  // 故单实例下「非空 + waiting」当且仅当「我刚重发出去」，收窄后行为逐字不变。
+  if (state.pendingRetry !== null && state.turnStatus === "waiting") {
     state = { ...state, pendingRetry: null, statusDetail: "" };
   }
   switch (event.kind) {
@@ -1210,8 +1429,10 @@ export function reduceStreamEvent(
           pendingPermissions: [],
           // R13：进程异常退出同属「出错」（条带保持展开；中断后若真机走 procError 也落这里）
           lastTurnEnd: { round: lastUserIndex(state.messages), end: "error" },
+          // R15：补 errorCode——横幅据此给「安装说明」出口（此前该分支不带码，按钮条件认不到）
+          errorCode: "CLAUDE_NOT_FOUND",
           errorBanner:
-            "未找到 claude CLI（CLAUDE_NOT_FOUND）。请安装 Claude Code 并确认 PATH 可用，或设置 cliPathOverride。",
+            "未找到 claude CLI（CLAUDE_NOT_FOUND）。可能是缓存的路径已失效（已自动重新检测，重发即可），或尚未安装——装好后重开本面板即可生效。",
         };
       }
       const tail =

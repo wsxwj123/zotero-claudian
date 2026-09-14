@@ -578,16 +578,37 @@ test("m9: evaluateCliStatus 未找到（override 非空）→ 文案带 override
   assert.ok(s.message.includes("/gone/claude"));
 });
 
-test("m9: evaluateCliStatus --version 执行失败 → CLAUDE_NOT_FOUND（不可执行）", () => {
+// R15 F7：执行失败与「未找到」分开——失败带 CLAUDE_EXEC_FAILED（附原文原因），不再共用
+// CLAUDE_NOT_FOUND，也不出现「请确认安装完整 / 重新安装」这类劝重装措辞
+test("m9(R15): evaluateCliStatus --version 执行失败 → CLAUDE_EXEC_FAILED（带原因，不劝重装）", () => {
   const s = evaluateCliStatus({
     resolvedPath: "/opt/broken/claude",
     override: "",
     overrideExists: false,
-    version: { failed: true },
+    version: { failed: true, reason: "spawn denied" },
     auth: null,
   });
-  assert.equal(s.code, "CLAUDE_NOT_FOUND");
+  assert.equal(s.code, "CLAUDE_EXEC_FAILED");
   assert.ok(s.message.includes("/opt/broken/claude"));
+  assert.ok(s.message.includes("spawn denied"), "带执行失败的原文原因");
+  assert.ok(!s.message.includes("确认安装完整"), "不得出现劝重装措辞");
+});
+
+// R15 F7：**超时 ≠ 装坏了**——独立错误码与归因文案，且不出现劝重装措辞
+test("m9(R15): evaluateCliStatus 探测超时 → CLAUDE_PROBE_TIMEOUT（安全软件/冷启动归因）", () => {
+  const s = evaluateCliStatus({
+    resolvedPath: "C:\\Users\\me\\.local\\bin\\claude.exe",
+    override: "",
+    overrideExists: false,
+    version: { timedOut: true },
+    auth: null,
+  });
+  assert.equal(s.code, "CLAUDE_PROBE_TIMEOUT");
+  assert.ok(s.message.includes("自动重试"), "告知会自动重试");
+  assert.ok(
+    !s.message.includes("确认安装完整") && !s.message.includes("重新安装"),
+    "超时不得劝重装",
+  );
 });
 
 test("m9: evaluateCliStatus v1 → CLAUDE_VERSION_TOO_OLD（需 ≥ 2）", () => {

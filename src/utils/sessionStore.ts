@@ -55,11 +55,27 @@ export interface SessionRecord {
   usage?: UsageStats;
 }
 
+/**
+ * R14 修点 3：随 assistant 行落盘的过程块（thinking / tool），只留回放要用的最小字段
+ * （index/streaming 是视图字段，回放时按数组序重建）。落盘前已逐块截断（见 hostBridge
+ * 的 finalizeTurnBlocks），这里只负责形态校验。
+ */
+export type PersistedTurnBlock =
+  | { blockType: "thinking"; text: string }
+  | {
+      blockType: "tool";
+      toolName: string;
+      inputJson: string;
+      result: { isError: boolean; summary: string } | null;
+    };
+
 /** 旁挂历史单行（§4.5；也是桥 history 消息的载荷形态） */
 export interface HistoryRecord {
   role: "user" | "assistant";
   text: string;
   ts: number;
+  /** R14：该 assistant 行的过程块（可选；旧文件没有该键 = 与今天行为逐字相同） */
+  blocks?: PersistedTurnBlock[];
 }
 
 export interface SessionsIndexResult {
@@ -246,18 +262,72 @@ export function parseHistoryJsonl(raw: string): HistoryRecord[] {
     if (typeof parsed.text !== "string") {
       continue;
     }
+    const blocks = parsePersistedBlocks(parsed.blocks);
+    // R14：没有合法过程块的行必须产出**恰好三个键**（绝不能出现 blocks: undefined——
+    // tests/acceptance/storage.test.mjs 的 deepEqual 往返断言按三键形态锁死）
     out.push({
       role,
       text: parsed.text,
       ts: asFiniteNumber(parsed.ts, 0),
+      ...(blocks ? { blocks } : {}),
     });
   }
   return out;
 }
 
-/** 旁挂历史序列化（契约函数，验收锁定）：单行 JSON、无结尾换行（拼 "\n" 即写进 jsonl） */
+/**
+ * R14：blocks 字段形态校验——非法条目逐条丢弃（绝不跳过整行）；没有一条合法 → null
+ * （调用方据此不写该键）。截断兜底：手工改过历史文件的超长值在这里再切一次。
+ */
+const PERSISTED_BLOCK_TEXT_MAX = 2200;
+function parsePersistedBlocks(value: unknown): PersistedTurnBlock[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const out: PersistedTurnBlock[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) {
+      continue;
+    }
+    if (raw.blockType === "thinking" && typeof raw.text === "string") {
+      out.push({
+        blockType: "thinking",
+        text: raw.text.slice(0, PERSISTED_BLOCK_TEXT_MAX),
+      });
+      continue;
+    }
+    if (raw.blockType === "tool" && typeof raw.toolName === "string") {
+      const inputJson =
+        typeof raw.inputJson === "string"
+          ? raw.inputJson.slice(0, PERSISTED_BLOCK_TEXT_MAX)
+          : "";
+      let result: { isError: boolean; summary: string } | null = null;
+      if (isRecord(raw.result) && typeof raw.result.summary === "string") {
+        result = {
+          isError: raw.result.isError === true,
+          summary: raw.result.summary.slice(0, 600),
+        };
+      }
+      out.push({
+        blockType: "tool",
+        toolName: raw.toolName,
+        inputJson,
+        result,
+      });
+    }
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** 旁挂历史序列化（契约函数，验收锁定）：单行 JSON、无结尾换行（拼 "\n" 即写进 jsonl）。
+ *  R14：blocks 只在非空时写该键——旧形态（三键）逐字不变。 */
 export function formatHistoryRecord(rec: HistoryRecord): string {
-  return JSON.stringify({ role: rec.role, text: rec.text, ts: rec.ts });
+  return JSON.stringify({
+    role: rec.role,
+    text: rec.text,
+    ts: rec.ts,
+    ...(rec.blocks && rec.blocks.length > 0 ? { blocks: rec.blocks } : {}),
+  });
 }
 
 // ---- 文件系统注入面（Gecko 侧 IOUtils，测试侧内存实现）----
@@ -345,11 +415,13 @@ export interface SessionStore {
   rename(id: string, title: string): Promise<SessionRecord | null>;
   /** 删索引记录 + 旁挂历史文件（§4.5；不碰 ~/.claude）；未知 id → false */
   remove(id: string): Promise<boolean>;
-  /** 追加一轮 user+assistant 两行；返回写入行数（未知 id → 0） */
+  /** 追加一轮 user+assistant 两行（R14：带过程块时纯工具轮也写 assistant 行）；
+   *  返回写入行数（未知 id → 0） */
   appendTurn(
     id: string,
     userText: string,
     assistantText: string,
+    blocks?: PersistedTurnBlock[],
   ): Promise<number>;
   /** 读旁挂历史；未知 id/无文件/读失败 → []（§4.6 getHistory 契约） */
   readHistory(id: string): Promise<HistoryRecord[]>;
@@ -655,6 +727,8 @@ export function createSessionStore(deps: SessionStoreDeps): SessionStore {
       id: string,
       userText: string,
       assistantText: string,
+      /** R14 修点 3：本轮过程块（可选；旧调用方不传 = 逐字不变） */
+      blocks?: PersistedTurnBlock[],
     ): Promise<number> {
       return ensureLoaded().then(() =>
         enqueue(async () => {
@@ -666,13 +740,16 @@ export function createSessionStore(deps: SessionStoreDeps): SessionStore {
           const lines = [
             formatHistoryRecord({ role: "user", text: userText, ts }),
           ];
-          if (assistantText) {
-            // assistant 无文本（纯工具轮）不写空行：UI 回放会渲染空气泡
+          const blockList = blocks && blocks.length > 0 ? blocks : null;
+          if (assistantText || blockList) {
+            // assistant 无文本（纯工具轮）不写空行：UI 回放会渲染空气泡——但 R14 起，
+            // 纯工具轮带过程块时必须有承载行，否则条带整轮丢失（建议 2）
             lines.push(
               formatHistoryRecord({
                 role: "assistant",
                 text: assistantText,
                 ts,
+                ...(blockList ? { blocks: blockList } : {}),
               }),
             );
           }

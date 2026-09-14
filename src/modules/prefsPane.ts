@@ -246,11 +246,26 @@ function refreshCliHint(input: HTMLInputElement, hint: Element): void {
     return;
   }
   void IOUtils.exists(value).then(
-    (exists) =>
-      setText(
-        hint,
-        getString(exists ? "prefs-cli-hint-ok" : "prefs-cli-hint-missing"),
-      ),
+    async (exists) => {
+      if (!exists) {
+        setText(hint, getString("prefs-cli-hint-missing"));
+        return;
+      }
+      // R15 F11：指向 .exe 且体积异常偏小（<5MB）→ 单独提示「存在但可疑」——
+      // 下载中断/被杀软隔离的残壳正是「路径存在却跑不起来」的常见来源
+      if (/\.exe$/i.test(value)) {
+        try {
+          const stat = await IOUtils.stat(value);
+          if (typeof stat.size === "number" && stat.size < 5 * 1024 * 1024) {
+            setText(hint, getString("prefs-cli-hint-suspicious"));
+            return;
+          }
+        } catch {
+          // 取不到体积 → 按正常提示（不因此报错）
+        }
+      }
+      setText(hint, getString("prefs-cli-hint-ok"));
+    },
     (err) => Zotero.logError(err as Error),
   );
 }

@@ -342,6 +342,8 @@ test("procError CLAUDE_NOT_FOUND → 安装引导横幅", () => {
     reason: "CLAUDE_NOT_FOUND",
   });
   assert.ok(s.errorBanner.includes("CLAUDE_NOT_FOUND"));
+  // R15：该分支必须带 errorCode——横幅的「安装说明」按钮靠它显示（验收裁判指出的缺口）
+  assert.equal(s.errorCode, "CLAUDE_NOT_FOUND");
 });
 
 test("procError 通用 → stderr 尾部进横幅", () => {

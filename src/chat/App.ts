@@ -694,7 +694,7 @@ export function App(props: AppProps): VNode<any> {
               )
             : null,
           // CLI 不可用（M9 检测引导）：给安装说明出口（§4.7：链接一律经桥 openExternal 外开）
-          state.errorCode === "CLAUDE_NOT_FOUND"
+          showsInstallHint(state.errorCode)
             ? h(
                 "button",
                 {
@@ -1086,14 +1086,35 @@ function Header(props: {
   );
 }
 
-/** 顶栏余额区文案（null = 该状态下不显示余额文本） */
-function balanceTextOf(
+/**
+ * 横幅「安装说明」按钮的显示判据（导出供单测）。
+ * R15：执行失败/探测超时同样值得给安装出口——「跑不起来」以前归 CLAUDE_NOT_FOUND，改判成
+ * CLAUDE_EXEC_FAILED 后若不放宽这里，按钮会**变相消失**（验收裁判抓到的回归）。
+ */
+export function showsInstallHint(errorCode: string | null): boolean {
+  return (
+    errorCode === "CLAUDE_NOT_FOUND" ||
+    errorCode === "CLAUDE_EXEC_FAILED" ||
+    errorCode === "CLAUDE_PROBE_TIMEOUT"
+  );
+}
+
+/**
+ * 顶栏余额区文案（null = 该状态下不显示余额文本）。导出供单测（R16）。
+ *
+ * R16：`canRefresh` 恒为 true——刷新入口只随「有没有余额状态」出现，不随「上次查到的
+ * provider 是不是 deepseek」消失。原判据 `provider === "deepseek"` 会在切到别的 provider
+ * 查过一次之后把刷新按钮永久拿掉（provider 是 cc switch 等在插件外切换的，插件察觉不到
+ * 变化），切回 deepseek 后再无任何入口重新查询，只能重开面板——用户实测踩到。宿主侧的
+ * force 刷新本来就会每次重新判定 provider，多点一次没有副作用。
+ */
+export function balanceTextOf(
   balance: ChatState["balance"],
 ): { text: string; title: string; canRefresh: boolean } | null {
   if (!balance) {
     return null; // 宿主还没推（老宿主/查询未接线）→ 不占位
   }
-  const canRefresh = balance.provider === "deepseek";
+  const canRefresh = true;
   const b = balance.balance;
   switch (b.state) {
     case "loading":

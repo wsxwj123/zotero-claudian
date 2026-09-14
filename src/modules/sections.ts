@@ -62,7 +62,13 @@ import {
   type TurnPromptInput,
   type UiWindowKey,
 } from "./hostBridge";
+import { resolveNpmPrefixDirs } from "./npmPrefix";
+import { readWinLivePathDirs } from "./winRegistry";
 import {
+  pickClaudeCandidate,
+  scanClaudeCandidates,
+  type CandidateScan,
+  type CliCandidate,
   resolveClaudeCommand,
   buildCliInvocation,
   buildWin32PathPlan,
@@ -217,6 +223,119 @@ interface SpawnBase {
 let spawnBase: SpawnBase | null = null;
 let shellPathDirs: string[] | null = null;
 
+/** R15 F6：采纳候选的指纹（path + size + mtime）——任一变化即重解析（claude 自更新/被换包） */
+let spawnBaseStamp: {
+  path: string;
+  size: number | null;
+  mtimeMs: number | null;
+} | null = null;
+/** R15 F3：注册表实时 PATH 的短缓存（TTL；装完 claude 后免重启发现） */
+let winLivePathCache: { dirs: string[]; at: number } | null = null;
+const WIN_LIVE_PATH_TTL_MS = 10_000;
+
+/** R15 F6 的纯判据（可单测）：期望指纹 vs 当前指纹；拿不到现状（null）视为已失效 */
+export function isStampFresh(
+  stamp: { size: number | null; mtimeMs: number | null } | null,
+  now: { size: number | null; mtimeMs: number | null },
+): boolean {
+  if (!stamp || now.size === null || now.mtimeMs === null) {
+    return false;
+  }
+  return stamp.size === now.size && stamp.mtimeMs === now.mtimeMs;
+}
+
+interface NsIFileStatLike {
+  initWithPath(path: string): void;
+  exists(): boolean;
+  readonly fileSize: number;
+  readonly lastModifiedTime: number;
+}
+
+/** 同步 stat（nsIFile）；拿不到（文件不存在/非 chrome 环境）→ 双 null */
+function statSync(path: string): {
+  size: number | null;
+  mtimeMs: number | null;
+} {
+  try {
+    const classes = Components.classes as unknown as Record<
+      string,
+      { createInstance(iface: unknown): NsIFileStatLike }
+    >;
+    const file = classes["@mozilla.org/file/local;1"].createInstance(
+      Components.interfaces.nsIFile,
+    );
+    file.initWithPath(path);
+    if (!file.exists()) {
+      return { size: null, mtimeMs: null };
+    }
+    return {
+      size: Number.isFinite(file.fileSize) ? file.fileSize : null,
+      mtimeMs: Number.isFinite(file.lastModifiedTime)
+        ? file.lastModifiedTime
+        : null,
+    };
+  } catch {
+    return { size: null, mtimeMs: null };
+  }
+}
+
+/** 解析器的 fileSize 注入（体积极门用；拿不到按 0 → 不过门，但 exists 才是第一道闸） */
+function fileSizeSync(path: string): number {
+  return statSync(path).size ?? 0;
+}
+
+/** 解析器的 mtime 注入（只影响 resident / npm-prefix 桶内的「更新者优先」） */
+function fileMtimeMsSync(path: string): number | null {
+  return statSync(path).mtimeMs;
+}
+
+/** 注册表实时 PATH（短缓存；非 win32 / 读取失败 → []） */
+function winLivePathDirs(): string[] {
+  const now = Date.now();
+  if (winLivePathCache && now - winLivePathCache.at < WIN_LIVE_PATH_TTL_MS) {
+    return winLivePathCache.dirs;
+  }
+  const dirs = readWinLivePathDirs(Zotero.isWin);
+  winLivePathCache = { dirs, at: now };
+  return dirs;
+}
+
+/** `%USERPROFILE%\.npmrc` 文本（读不到 → ""；自定义 prefix 的常见来源） */
+async function readNpmrcText(home: string): Promise<string> {
+  try {
+    const p = `${home}\\.npmrc`;
+    return (await IOUtils.exists(p)) ? await IOUtils.readUTF8(p) : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 指纹是否仍新鲜。UNC 候选（`\\server\share\…`，来自注册表 PATH / .npmrc prefix）**跳过
+ * stat 直接视为新鲜**：断链 SMB 上一次同步 stat 会阻塞 Zotero 主线程数秒，而这条路径每次
+ * send 都会走（WIN-COMPAT 建议-3）；这类路径的失效由 spawn 失败钩子（invalidateCliResolve）
+ * 兜底——路径没变时进程照跑，真坏了会在下一轮被清缓存重解析。
+ */
+function spawnBaseStampIsFresh(): boolean {
+  if (!spawnBaseStamp) {
+    return false;
+  }
+  if (spawnBaseStamp.path.startsWith("\\\\")) {
+    return true;
+  }
+  return isStampFresh(spawnBaseStamp, statSync(spawnBaseStamp.path));
+}
+
+/**
+ * R15 F6：宿主发现 spawn 侧 claude 不可用（未找到 / 起不来）→ 丢弃解析缓存，
+ * 下一次 send 重新解析（装完 claude 免重启自愈的关键一环）。
+ */
+export function invalidateCliResolve(): void {
+  spawnBase = null;
+  spawnBaseStamp = null;
+  winLivePathCache = null;
+}
+
 function currentPlatform(): Platform {
   if (Zotero.isWin) return "win32";
   if (Zotero.isMac) return "darwin";
@@ -227,16 +346,34 @@ function homeDir(): string {
   return Services.dirsvc.get("Home", Components.interfaces.nsIFile).path;
 }
 
-/** 常驻目录候选（PLAN §2.10 A 表，依序探测） */
+/**
+ * 常驻目录候选（PLAN §2.10 A 表，依序探测；R15 F5 扩容：4 → 13 项）。
+ * 覆盖：官方原生安装器（.local\bin / AnthropicClaude）、旧 install.sh（.claude\local）、
+ * npm 全局默认位（自定义 prefix 走 npmPrefix.ts 另一路）、nvm-windows/系统 node
+ * （Program Files\nodejs）、volta / pnpm / yarn / bun、scoop / chocolatey / winget。
+ * 明确不做全盘枚举（首次数分钟 + 被安全软件拦，BRIEF-R15 §5）。
+ */
 function residentDirsFor(platform: Platform): string[] {
   const home = homeDir();
   if (platform === "win32") {
     const appData = Services.env.get("APPDATA") ?? "";
     const localAppData = Services.env.get("LOCALAPPDATA") ?? "";
     const userProfile = Services.env.get("USERPROFILE") ?? "";
+    const programFiles =
+      Services.env.get("ProgramFiles") ?? "C:\\Program Files";
+    const programData = Services.env.get("ProgramData") ?? "C:\\ProgramData";
     return [
       `${userProfile}\\.local\\bin`,
+      `${userProfile}\\.claude\\local`,
+      `${localAppData}\\AnthropicClaude`,
       `${appData}\\npm`,
+      `${localAppData}\\Volta\\bin`,
+      `${localAppData}\\pnpm`,
+      `${localAppData}\\Yarn\\bin`,
+      `${userProfile}\\.bun\\bin`,
+      `${programFiles}\\nodejs`,
+      `${programData}\\chocolatey\\bin`,
+      `${localAppData}\\Microsoft\\WinGet\\Links`,
       `${localAppData}\\Programs`,
       `${userProfile}\\scoop\\shims`,
     ].filter(Boolean);
@@ -297,14 +434,30 @@ async function getShellPathDirs(): Promise<string[]> {
 
 /** spawn 基础（结果缓存；解析失败不缓存，下次 send 重试——用户可能中途装好 CLI）。
  *  设置页改 cliPathOverride 时由 startCliStatusWatch 的偏好观察者置空缓存（改动下一次 spawn 生效）。 */
-async function resolveSpawnBase(): Promise<SpawnBase> {
-  if (spawnBase) {
-    return spawnBase;
-  }
+/** R15：一次解析的产物（候选扫描与 spawn 组装共用，probe 链复用同一套环境） */
+interface ResolvedEnv {
+  platform: Platform;
+  pathDirs: string[];
+  registryDirs: string[];
+  npmPrefixDirs: string[];
+  residentDirs: string[];
+  environment: Record<string, string>;
+  environmentAppend: boolean;
+  cmdExe: string;
+}
+
+/**
+ * R15 F3/F4：组装解析环境。win32 的候选来源（序见 PLAN-R15 §4）：进程 PATH → **注册表实时
+ * PATH**（覆盖「装完没重启」）→ **npm 全局 prefix**（自定义 prefix 不进 PATH 的那类）→
+ * 常驻目录表；darwin 逐字保持旧行为（登录 shell PATH → 常驻目录）。
+ */
+async function buildResolvedEnv(): Promise<ResolvedEnv> {
   const platform = currentPlatform();
   let pathDirs: string[];
   let environment: Record<string, string>;
   let cmdExe = "";
+  let registryDirs: string[] = [];
+  let npmPrefixDirs: string[] = [];
   if (platform === "win32") {
     // cmd.exe 绝对路径：Gecko 的 Subprocess 不查 COMSPEC/PATH（裸名直接拒收），
     // 这里一次取定喂给 cmd 通道（§2.10 B）
@@ -312,56 +465,117 @@ async function resolveSpawnBase(): Promise<SpawnBase> {
       ComSpec: Services.env.get("ComSpec") ?? "",
       SystemRoot: Services.env.get("SystemRoot") ?? "",
     });
+    registryDirs = winLivePathDirs();
+    npmPrefixDirs = resolveNpmPrefixDirs({
+      npmrcText: await readNpmrcText(homeDir()),
+      envPrefix: Services.env.get("npm_config_prefix") ?? "",
+      appData: Services.env.get("APPDATA") ?? "",
+    });
+    const residentDirs = residentDirsFor(platform);
     // win32 无登录 shell 可探（M10 走查：探测必失败 → 此前 PATH 为空串，claude.cmd 里的
-    // node 解析不到）。以进程 PATH 为基底 + 常驻目录兜底，走 buildSpawnEnv 组装（§2.10 A/C）。
+    // node 解析不到）。以进程 PATH 为基底 + 注册表实时 PATH + 常驻目录兜底，走 buildSpawnEnv
+    // 组装（§2.10 A/C）——spawn 环境里也带上这些目录，claude.cmd 内的 node 才解析得到。
     const plan = buildWin32PathPlan({
       processPath: Services.env.get("PATH") ?? "",
       env: {
         SystemRoot: Services.env.get("SystemRoot") ?? "",
         TEMP: Services.env.get("TEMP") ?? "",
       },
-      residentDirs: residentDirsFor(platform),
+      registryPathDirs: registryDirs,
+      residentDirs,
     });
     pathDirs = plan.pathDirs;
     environment = plan.environment;
-  } else {
-    pathDirs = await getShellPathDirs();
-    // 环境原样透传（environmentAppend），仅覆盖 PATH = 登录 shell PATH（§4.1 env 行）
-    environment = { PATH: pathDirs.join(":") };
-  }
-  const resolved = resolveClaudeCommand({
-    platform,
-    pathDirs,
-    residentDirs: residentDirsFor(platform),
-    override: getCliPathOverride(),
-    exists: fileExistsSync,
-  });
-  if (resolved.status === "not_found") {
-    Zotero.debug(
-      `[claudian] claude CLI not found (PATH dirs: ${pathDirs.length})`,
-    );
     return {
-      command: null,
-      channel: "direct",
-      environment: {},
+      platform,
+      pathDirs,
+      registryDirs,
+      npmPrefixDirs,
+      residentDirs,
+      environment,
       environmentAppend: true,
       cmdExe,
     };
   }
-  spawnBase = {
-    command: resolved.path,
-    // darwin 恒经 sh 包装（提 fd 上限，真实实测 2026-09-11）：launchd 启动的 Zotero 继承的
-    // fd 上限低于 CLI 启动所需，CLI 启动即 exit 1；解析层的 channel 保持 direct（发现语义），
-    // 包装是 spawn 层的事。linux 不提（非 launchd 环境，本版不在范围）。
-    channel: platform === "darwin" ? "sh" : resolved.channel,
-    environment,
+  pathDirs = await getShellPathDirs();
+  // 环境原样透传（environmentAppend），仅覆盖 PATH = 登录 shell PATH（§4.1 env 行）
+  return {
+    platform,
+    pathDirs,
+    registryDirs: [],
+    npmPrefixDirs: [],
+    residentDirs: residentDirsFor(platform),
+    environment: { PATH: pathDirs.join(":") },
     environmentAppend: true,
     cmdExe,
   };
-  Zotero.debug(
-    `[claudian] claude CLI resolved: ${resolved.path} (${resolved.source})`,
-  );
-  return spawnBase;
+}
+
+/** R15 F1：候选扫描（把解析环境喂给纯函数枚举器） */
+function scanFor(env: ResolvedEnv): CandidateScan {
+  return scanClaudeCandidates({
+    platform: env.platform,
+    pathDirs: env.pathDirs,
+    registryPathDirs: env.registryDirs,
+    npmPrefixDirs: env.npmPrefixDirs,
+    residentDirs: env.residentDirs,
+    override: getCliPathOverride(),
+    exists: fileExistsSync,
+    fileSize: fileSizeSync,
+    mtimeMs: fileMtimeMsSync,
+  });
+}
+
+/** 候选 → spawn 基础（darwin 恒经 sh 包装：提 fd 上限，真实实测 2026-09-11；见旧注释） */
+function baseOf(env: ResolvedEnv, c: CliCandidate): SpawnBase {
+  return {
+    command: c.path,
+    channel: env.platform === "darwin" ? "sh" : c.channel,
+    environment: env.environment,
+    environmentAppend: true,
+    cmdExe: env.cmdExe,
+  };
+}
+
+function emptyBase(env: ResolvedEnv): SpawnBase {
+  return {
+    command: null,
+    channel: "direct",
+    environment: {},
+    environmentAppend: true,
+    cmdExe: env.cmdExe,
+  };
+}
+
+/** 采纳一个候选：写 spawnBase + 指纹（供 F6 校验） */
+function adoptCandidate(env: ResolvedEnv, c: CliCandidate): void {
+  spawnBase = baseOf(env, c);
+  const st = statSync(c.path);
+  spawnBaseStamp = { path: c.path, size: st.size, mtimeMs: st.mtimeMs };
+  Zotero.debug(`[claudian] claude CLI resolved: ${c.path} (${c.source})`);
+}
+
+/**
+ * spawn 基础（结果缓存 + R15 F6 指纹校验；解析失败不缓存，下次 send 重试）。
+ * **不探测**（探测链只属于 probeCliStatus，REVIEW-R15 致命-2：spawn 路径零新增等待）：
+ * 这里只做「首个过门候选」的挑选与缓存；probe 跑通别的候选时会改写 spawnBase。
+ */
+async function resolveSpawnBase(): Promise<SpawnBase> {
+  if (spawnBase && spawnBaseStamp && spawnBaseStampIsFresh()) {
+    return spawnBase;
+  }
+  spawnBase = null;
+  spawnBaseStamp = null;
+  const env = await buildResolvedEnv();
+  const hit = pickClaudeCandidate(scanFor(env));
+  if (!hit) {
+    Zotero.debug(
+      `[claudian] claude CLI not found (PATH dirs: ${env.pathDirs.length})`,
+    );
+    return emptyBase(env);
+  }
+  adoptCandidate(env, hit);
+  return baseOf(env, hit);
 }
 
 // ---- CLI 检测（M9，PLAN §2.7）：启动探测 + 设置变更重查 + 结果推 UI 横幅 ----
@@ -377,6 +591,27 @@ const PROBE_STDERR_KEEP_CHARS = 400;
 let cliStatus: CliStatus | null = null;
 let cliProbeInflight: Promise<void> | null = null;
 let cliPrefObserver: symbol | null = null;
+
+/**
+ * R15 F9：diag 的候选清单行。长路径必须**先留尾巴**（候选总数不许被 DIAG_VALUE_MAX 切掉）：
+ * 超预算就从后往前丢候选，保留「共 N 条」与已展示项。
+ */
+async function diagCandidatesLine(): Promise<string> {
+  const env = await buildResolvedEnv();
+  const cands = scanFor(env).candidates;
+  if (cands.length === 0) {
+    return "0 条（未找到任何候选）";
+  }
+  const entry = (c: CliCandidate, i: number): string =>
+    `[${i}]${c.via}${c.sizeOk ? "" : "(!体积)"}=${c.path}`;
+  const total = ` 共 ${cands.length} 条`;
+  const shown = cands.map(entry);
+  while (shown.length > 1 && shown.join(" | ").length + total.length > 280) {
+    shown.pop();
+  }
+  const dropped = cands.length - shown.length;
+  return `${shown.join(" | ")}${dropped > 0 ? ` …(+${dropped} 条未展示)` : ""}${total}`;
+}
 
 /** 供 hostBridge 在实例注册后取用（null = 还没测完；测完时 refreshCliStatus 会广播） */
 export function getCliStatus(): CliStatus | null {
@@ -513,12 +748,61 @@ async function runProbe(
   }
 }
 
-/** 探测链：解析路径 → `claude --version`（≥2）→ `claude auth status`（登录态） */
+/** R15 F8：候选链最多实测几个（正常路径第 1 个就过，零额外 spawn） */
+const MAX_CANDIDATE_PROBES = 3;
+/** R15 F10：探测超时后的一次性重探延迟（冷启动进系统缓存后通常毫秒级） */
+const PROBE_RETRY_DELAY_MS = 15_000;
+/** R15 F10：面板打开时重查的最小间隔（防多实例/频繁开关造成探测风暴） */
+const REPROBE_MIN_INTERVAL_MS = 20_000;
+let probeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let lastProbeAt = 0;
+
+/** R15 F10：超时 → 15 秒后重探一次（重探前清指纹绕过缓存，REVIEW-R15 重要-2） */
+function scheduleProbeRetry(): void {
+  if (probeRetryTimer !== null) {
+    return;
+  }
+  probeRetryTimer = setTimeout(() => {
+    probeRetryTimer = null;
+    spawnBase = null;
+    spawnBaseStamp = null;
+    void refreshCliStatus();
+  }, PROBE_RETRY_DELAY_MS);
+}
+
+/** R15 F10：面板打开时——上次检测失败才重查（成功不打扰），且受最小间隔约束 */
+export function reprobeCliIfFailed(): void {
+  if (cliStatus && cliStatus.ok) {
+    return;
+  }
+  if (Date.now() - lastProbeAt < REPROBE_MIN_INTERVAL_MS) {
+    return;
+  }
+  spawnBase = null;
+  spawnBaseStamp = null;
+  void refreshCliStatus();
+}
+
+/**
+ * 探测链（R15 F8 候选推进版）：按候选序实测 `claude --version` ——
+ * - 第 1 个候选跑通（exit 0 且能解析出版本号）→ 采纳（写 spawnBase + 指纹），再做 auth 探测；
+ * - **超时不算失败**：不推进候选、不采纳、不写指纹，直接出 CLAUDE_PROBE_TIMEOUT 并安排 15s 重探
+ *   （REVIEW-R15 重要-2：超时时若也写指纹，重探会被缓存短路）；
+ * - 明确失败（非零退出 / spawn 拒收）→ 推进下一个候选，最多 MAX_CANDIDATE_PROBES 个；
+ * - 全部失败 → CLAUDE_EXEC_FAILED，带最后一条的原文原因。
+ * **只有本函数会推进候选链**；spawn 路径（resolveSpawnBase）永远只用当前缓存/首个候选。
+ */
 async function probeCliStatus(): Promise<CliStatus> {
-  const base = await resolveSpawnBase();
+  lastProbeAt = Date.now();
   const override = getCliPathOverride().trim();
   const overrideExists = override ? fileExistsSync(override) : false;
-  if (!base.command) {
+  const env = await buildResolvedEnv();
+  const scan = scanFor(env);
+  const ordered = [
+    ...scan.candidates.filter((c) => c.sizeOk),
+    ...scan.candidates.filter((c) => !c.sizeOk),
+  ];
+  if (ordered.length === 0) {
     return evaluateCliStatus({
       resolvedPath: null,
       override,
@@ -527,18 +811,58 @@ async function probeCliStatus(): Promise<CliStatus> {
       auth: null,
     });
   }
-  const versionRun = await runProbe(base, ["--version"]);
-  const major = versionRun.ok ? parseClaudeVersion(versionRun.stdout) : null;
-  const version = major === null ? ({ failed: true } as const) : { major };
-  let auth: { loggedIn: boolean } | null = null;
-  if ("major" in version) {
-    const authRun = await runProbe(base, ["auth", "status"]);
-    const parsed = authRun.ok ? parseAuthStatus(authRun.stdout) : null;
-    // 探测执行失败/输出不可判定 → 不据此报「未登录」（fail-open：检测的毛病不该怪用户）
-    auth = parsed ? { loggedIn: parsed.loggedIn } : null;
+  let probed = 0;
+  let lastReason = "";
+  let adopted: CliCandidate | null = null;
+  let version: { major: number } | { failed: true; reason?: string } | null =
+    null;
+  for (const c of ordered) {
+    if (probed >= MAX_CANDIDATE_PROBES) {
+      break;
+    }
+    const run = await runProbe(baseOf(env, c), ["--version"]);
+    if (run.ok) {
+      const major = parseClaudeVersion(run.stdout);
+      if (major !== null) {
+        adopted = c;
+        version = { major };
+        break;
+      }
+      lastReason = `--version 输出无法识别版本号：${run.stdout.trim().slice(0, 200)}`;
+    } else if (run.timedOut) {
+      Zotero.debug(
+        `[claudian] cli probe timed out: ${c.path}（不推进候选，安排 ${PROBE_RETRY_DELAY_MS}ms 后重探）`,
+      );
+      scheduleProbeRetry();
+      return evaluateCliStatus({
+        resolvedPath: c.path,
+        override,
+        overrideExists,
+        version: { timedOut: true },
+        auth: null,
+      });
+    } else {
+      lastReason = run.reason || "进程非零退出";
+    }
+    probed++;
   }
+  if (!adopted) {
+    return evaluateCliStatus({
+      resolvedPath: ordered[0].path,
+      override,
+      overrideExists,
+      version: { failed: true, reason: lastReason },
+      auth: null,
+    });
+  }
+  // 跑通的候选被采纳并缓存：下一次 send 起用这一个（spawn 路径零额外等待）
+  adoptCandidate(env, adopted);
+  const authRun = await runProbe(baseOf(env, adopted), ["auth", "status"]);
+  const parsed = authRun.ok ? parseAuthStatus(authRun.stdout) : null;
+  // 探测执行失败/输出不可判定 → 不据此报「未登录」（fail-open：检测的毛病不该怪用户）
+  const auth = parsed ? { loggedIn: parsed.loggedIn } : null;
   return evaluateCliStatus({
-    resolvedPath: base.command,
+    resolvedPath: adopted.path,
     override,
     overrideExists,
     version,
@@ -566,6 +890,12 @@ export function startCliStatusWatch(): void {
 
 /** 插件停用时收尾（观察者注销；探测在途结果自然丢弃，不再广播） */
 export function stopCliStatusWatch(): void {
+  // R15 F10 收尾：停用插件时清掉超时重探定时器——否则停用后 15 秒仍会跑一次探测
+  // （验收裁判指出的缺口）
+  if (probeRetryTimer !== null) {
+    clearTimeout(probeRetryTimer);
+    probeRetryTimer = null;
+  }
   if (cliPrefObserver) {
     try {
       Zotero.Prefs.unregisterObserver(cliPrefObserver);
@@ -2121,6 +2451,8 @@ async function collectDiagReport(sessionId: string | null): Promise<string> {
     ),
     cli: await diagField(diagCliLine),
     "cli.auth": await diagField(diagAuthState),
+    // R15 F9：候选清单（路径/来源/体积门结论）——报障时一眼看到「本机都在哪找到了什么」
+    "cli.candidates": await diagField(diagCandidatesLine),
     workspace: await diagField(diagWorkspaceLine),
     collection,
     reader:
@@ -2160,6 +2492,8 @@ function getHostBridge(): HostBridge {
     buildTurnPrompt,
     ensureWorkspace,
     getSpawnBase: resolveSpawnBase,
+    invalidateCliResolve,
+    reprobeCliIfFailed,
     getCliStatus,
     getMcpEndpoint,
     closeMcpTurn,

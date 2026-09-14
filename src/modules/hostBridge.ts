@@ -21,6 +21,7 @@ import {
 import type { CliChannel, CliStatus } from "./cliDetect";
 import {
   SESSION_TITLE_MAX,
+  type PersistedTurnBlock,
   type SessionRecord,
   type SessionStore,
 } from "../utils/sessionStore";
@@ -242,6 +243,10 @@ export interface HostBridgeDeps {
    * null/未注入 = 不推（尚未测完时由 sections 测完后 broadcast 补推）
    */
   getCliStatus?(): CliStatus | null;
+  /** R15 F6：宿主发现 spawn 侧 claude 不可用 → 丢弃解析缓存（下次 send 重解析） */
+  invalidateCliResolve?(): void;
+  /** R15 F10：面板打开时——上次检测失败才重查（成功不打扰），实现侧自带最小间隔 */
+  reprobeCliIfFailed?(): void;
   /**
    * 笔记写入（M7，§4.3）：真实实现在 modules/notes.ts（全项目唯一写库模块，sections.ts 接线）。
    * 未注入 → saveNote 回 noteSaved{ok:false, code:SAVE_FAILED}、listNotes 回 error。
@@ -340,6 +345,80 @@ export interface PickedFile {
 }
 
 /**
+ * R14 修点 3：本轮流式过程块的宿主侧累加器（onTurnEvent 逐事件攒，finishTurn 成品化落盘）。
+ * index 是 content_block 的 index（每个 messageStart 重新计数），归并一律「取最后一个匹中的」。
+ */
+interface TurnBlockAcc {
+  kind: "thinking" | "tool";
+  index: number;
+  text: string;
+  toolName: string;
+  toolUseId: string;
+  inputJson: string;
+  result: { isError: boolean; summary: string } | null;
+}
+
+/**
+ * 落盘前的逐块截断上限（UTF-16 码元）与整轮预算（**UTF-8 字节**）——防历史文件被大
+ * inputJson 撑爆。预算按 UTF-8 字节判（WIN-COMPAT 建议-2：按 `.length` 判时中文实际
+ * 落盘可达 3 倍预算，32K 变 ~96K）。
+ */
+const TURN_BLOCK_TEXT_MAX = 2000;
+const TURN_BLOCK_SUMMARY_MAX = 500;
+const TURN_BLOCKS_BUDGET = 32 * 1024;
+
+/** 字符串的 UTF-8 字节数（TextEncoder 在 Gecko/node 都有；取不到时回落码元数） */
+function utf8Bytes(s: string): number {
+  try {
+    return new TextEncoder().encode(s).length;
+  } catch {
+    return s.length;
+  }
+}
+
+function clipTurnBlockText(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/** 累加器 → 落盘成品：逐块截断、空思考块丢弃、超整轮预算即停止收集（后续块不落盘） */
+function finalizeTurnBlocks(accs: TurnBlockAcc[]): PersistedTurnBlock[] {
+  const out: PersistedTurnBlock[] = [];
+  let used = 0;
+  for (const acc of accs) {
+    const item: PersistedTurnBlock =
+      acc.kind === "thinking"
+        ? {
+            blockType: "thinking",
+            text: clipTurnBlockText(acc.text, TURN_BLOCK_TEXT_MAX),
+          }
+        : {
+            blockType: "tool",
+            toolName: acc.toolName,
+            inputJson: clipTurnBlockText(acc.inputJson, TURN_BLOCK_TEXT_MAX),
+            result: acc.result
+              ? {
+                  isError: acc.result.isError,
+                  summary: clipTurnBlockText(
+                    acc.result.summary,
+                    TURN_BLOCK_SUMMARY_MAX,
+                  ),
+                }
+              : null,
+          };
+    if (item.blockType === "thinking" && !item.text.trim()) {
+      continue; // 本机 CLI 思考文本常为空：空思考块不落盘（回放里是个纯占位）
+    }
+    const size = utf8Bytes(JSON.stringify(item));
+    if (used + size > TURN_BLOCKS_BUDGET) {
+      break;
+    }
+    used += size;
+    out.push(item);
+  }
+  return out;
+}
+
+/**
  * 单会话运行时状态（内存侧；持久侧是 SessionStore 的 SessionRecord，两者按 id 对应）。
  * 会话记录本身不驻留内存：每次用到就向 store 取，保证「索引是唯一真相」。
  */
@@ -352,6 +431,17 @@ interface SessionRuntime {
   /** 本轮 assistant 最终文本：assistantMessage 校准优先，textDelta 累积兜底 */
   assistantText: string;
   streamText: string;
+  /**
+   * R14：当前这条 assistant 消息已流出的正文（messageStart 清零 / textDelta 累加 /
+   * assistantMessage 之后清零）——在途轮占位正文用它。**不能用 assistantText 或
+   * streamText 代替**：前者是「上一条已完成消息」的正文（每条 assistantMessage 覆盖），
+   * 后者是「整轮累加」，多消息工具轮里都会拼出杂糅句（PLAN-R14 失败模式 E）。
+   */
+  curText: string;
+  /** R14：本轮被接受时该会话的已落盘历史行数（inFlight 幂等键，见 PLAN-R14 修点 2） */
+  baseRows: number;
+  /** R14 修点 3：本轮过程块累加器（落盘后回放轮才有条带） */
+  turnBlocks: TurnBlockAcc[];
   /**
    * R4-3：本轮 assistantMessage 逐条累加的用量（result 无 usage 时的兜底）。
    * result 到达即清空（该轮收尾）；不参与 index 以外的任何逻辑。
@@ -630,11 +720,37 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         pendingUserText: "",
         assistantText: "",
         streamText: "",
+        curText: "",
+        baseRows: 0,
+        turnBlocks: [],
         turnUsage: null,
       };
       runtimes.set(id, rt);
     }
     return rt;
+  }
+
+  /**
+   * R14：该会话当前在途轮（无 → null）。两个下发路径共用：handleGetHistory 的回执与
+   * handleSend 的开轮广播。只读 runtime（不新建）；判据同时要求 busy 与 pendingUserText
+   * 非空（finishTurn 里 pendingUserText 挪到落盘之后才清，见该函数——真正的挡板在 UI 侧
+   * 的 baseRows 行数键，这里只是第一道闸）。
+   */
+  function inFlightOf(sessionId: string): {
+    userText: string;
+    assistantText: string;
+    busy: "running" | "interrupting";
+    baseRows: number;
+  } | null {
+    const rt = runtimes.get(sessionId);
+    return rt?.busy && rt.pendingUserText
+      ? {
+          userText: rt.pendingUserText,
+          assistantText: rt.curText,
+          busy: rt.busy,
+          baseRows: rt.baseRows,
+        }
+      : null;
   }
 
   /** sessionList 消息：全量索引 + 条目标题解析（§4.6 宿主→UI 表） */
@@ -839,14 +955,20 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
   ): Promise<void> {
     const userText = rt.pendingUserText;
     const assistantText = rt.assistantText || rt.streamText;
-    rt.pendingUserText = "";
+    // R14 修点 3：本轮过程块成品化（截断 + 预算），随后与两行正文一起落盘
+    const blocks = finalizeTurnBlocks(rt.turnBlocks);
+    // R14：pendingUserText 挪到 appendTurn 之后再清（把「已清内存、未落盘」的窗口收窄；
+    // 正挡板在 UI 侧 R-B 的行数键）。其余字段与落盘无关，照旧先清。
     rt.assistantText = "";
     rt.streamText = "";
+    rt.curText = "";
+    rt.turnBlocks = [];
     try {
       const written = await deps.sessions.appendTurn(
         sessionId,
         userText,
         assistantText,
+        blocks,
       );
       const rec = deps.sessions.get(sessionId);
       if (rec) {
@@ -862,6 +984,8 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     } catch (err) {
       deps.log(`[bridge] finishTurn persist failed: ${String(err)}`);
     }
+    // R14：落盘（成功或失败）之后再清——inFlightOf 据此判「还有没有在途轮」
+    rt.pendingUserText = "";
     await pushSessionList();
   }
 
@@ -966,10 +1090,16 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           });
         }
         break;
+      case "messageStart":
+        // R14：新的一条 assistant 消息开始——curText 只装「当前这条」已流出的正文
+        rt.curText = "";
+        break;
       case "assistantMessage":
         // content[] 为权威最终文本；工具轮（无文本块）不覆盖上一段有文本的
         rt.assistantText =
           textOfAssistantMessage(event.content) || rt.assistantText;
+        // R14：本条消息已定稿（curText 是它已流出的部分，若随后被中断不再等来校准）
+        rt.curText = "";
         // R4-3：逐步累加（result 没带整轮用量时的兜底，见 resolveTurnUsage）
         if (event.usage) {
           rt.turnUsage = addUsage(rt.turnUsage, event.usage);
@@ -978,7 +1108,61 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       case "textDelta":
         // assistantMessage 缺失（丢帧）时的兜底文本
         rt.streamText += event.text;
+        // R14：当前这条消息的已流出正文（在途轮占位用）
+        rt.curText += event.text;
         break;
+      case "thinkingDelta": {
+        // R14 修点 3：思考文本攒一份（落盘 → 回放轮的条带）
+        const acc = rt.turnBlocks.find(
+          (b) => b.kind === "thinking" && b.index === event.index,
+        );
+        if (acc) {
+          acc.text += event.text;
+        } else {
+          rt.turnBlocks.push({
+            kind: "thinking",
+            index: event.index,
+            text: event.text,
+            toolName: "",
+            toolUseId: "",
+            inputJson: "",
+            result: null,
+          });
+        }
+        break;
+      }
+      case "toolBlockStart": {
+        // R14 修点 3：工具卡三要素（名字 / 入参 / 结果摘要）落盘
+        rt.turnBlocks.push({
+          kind: "tool",
+          index: event.index,
+          text: "",
+          toolName: event.toolName,
+          toolUseId: event.toolUseId,
+          inputJson: "",
+          result: null,
+        });
+        break;
+      }
+      case "toolInputDelta": {
+        // index 每个 messageStart 重新计数 → 归并取最后一个匹中的工具块
+        const acc = [...rt.turnBlocks]
+          .reverse()
+          .find((b) => b.kind === "tool" && b.index === event.index);
+        if (acc) {
+          acc.inputJson += event.jsonFragment;
+        }
+        break;
+      }
+      case "toolResult": {
+        const acc = [...rt.turnBlocks]
+          .reverse()
+          .find((b) => b.kind === "tool" && b.toolUseId === event.toolUseId);
+        if (acc) {
+          acc.result = { isError: event.isError, summary: event.summary };
+        }
+        break;
+      }
       case "result": {
         // R4-3：先用「索引累计 + 本轮」广播（UI 立即更新），落盘走同一份数据（finishTurn）
         const turn = resolveTurnUsage(rt, event);
@@ -1017,6 +1201,14 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           stderrTail: event.stderrTail ?? "",
           reason: event.reason,
         });
+        if (kind === "CLAUDE_NOT_FOUND") {
+          // R15 F6：缓存的可执行文件没了（被卸载/换包/优化软件清理）→ 丢缓存，
+          // 下一轮 send 重新枚举候选（装了别的 claude 也能自动接上）
+          deps.log(
+            "[bridge] procError classified CLAUDE_NOT_FOUND → drop resolve cache",
+          );
+          deps.invalidateCliResolve?.();
+        }
         if (kind === "SESSION_GONE") {
           deps.log("[bridge] procError classified SESSION_GONE");
           broadcast({
@@ -1296,6 +1488,28 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     rt.pendingUserText = text;
     rt.assistantText = "";
     rt.streamText = "";
+    rt.curText = "";
+    rt.baseRows = deps.sessions.get(sessionId)?.messageCount ?? 0;
+    rt.turnBlocks = [];
+    // R14 修点 4：开轮那一刻广播一次现成的 history（带 inFlight）——同一会话绑在多个页面上时，
+    // 非发送方实例 sessionId 不变、永远不拉历史，靠这条把「在途轮」送达。一轮一次（busy="running"
+    // 全仓唯一写入点就是上面那行）。读盘失败只记日志，绝不影响本轮发送。
+    void (async () => {
+      try {
+        const messages = await deps.sessions.readHistory(sessionId);
+        const f = inFlightOf(sessionId);
+        broadcast({
+          type: "history",
+          sessionId,
+          messages,
+          ...(f ? { inFlight: f } : {}),
+        });
+      } catch (err) {
+        deps.log(
+          `[bridge] in-flight history broadcast failed (${sessionId}): ${String(err)}`,
+        );
+      }
+    })();
     /** 本轮端点凭据：spawn 失败/进程退出都要撤销（§4.8 token 随该轮作废） */
     let mcp: { port: number; token: string } | null = null;
     /** 本轮附件目录写保护文件（spawn 失败/进程退出都要清理） */
@@ -1353,6 +1567,11 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       }
       const workspace = await deps.ensureWorkspace(input.itemKey);
       const base = await deps.getSpawnBase();
+      // R15 F6：解析不到 → 丢掉缓存（可能正是「装在了缓存生成之后」；下次 send 立刻重解析，
+      // 不必重启 Zotero）
+      if (!base.command) {
+        deps.invalidateCliResolve?.();
+      }
       if (!base.command) {
         rt.busy = null;
         sendTo(win, {
@@ -1907,7 +2126,14 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     const messages = sessionId
       ? await deps.sessions.readHistory(sessionId)
       : [];
-    sendTo(win, { type: "history", sessionId, messages });
+    // R14 修点 1：回执带上「这个会话现在在跑什么」（无在途轮则不带该键，老形态逐字不变）
+    const inFlight = sessionId ? inFlightOf(sessionId) : null;
+    sendTo(win, {
+      type: "history",
+      sessionId,
+      messages,
+      ...(inFlight ? { inFlight } : {}),
+    });
   }
 
   /**
@@ -2406,6 +2632,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
             code: cliStatus.code,
             message: cliStatus.message,
           });
+          // R15 F10：上次结论是失败 → 面板打开顺手重查一次（20s 最小间隔在实现侧把关；
+          // 装完 claude / 探测超时恢复后，用户重开面板即可看到好结果）
+          deps.reprobeCliIfFailed?.();
         }
         sendTo(win, await sessionListMessage());
         // R4-3：余额查询时机 = 面板打开（每个实例注册时一次；60s TTL 缓存兜住多实例重复打开）

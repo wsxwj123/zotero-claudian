@@ -31,6 +31,7 @@ prefs-cli-label = Path to the claude executable
 prefs-cli-hint-empty = Leave empty to auto-detect (PATH and common install locations)
 prefs-cli-hint-ok = Path is valid
 prefs-cli-hint-missing = Path does not exist: falling back to auto-detection; a notice will appear at the top of the chat page
+prefs-cli-hint-suspicious = The path exists, but the file is unusually small (possibly an incomplete download or quarantined by security software). Reinstall, or point to another claude install.
 prefs-usage-label = Show token usage / balance
 prefs-usage-hint = Show token usage and cache hit rate in the chat header; the DeepSeek account balance also shows when the provider is DeepSeek and a Key is set. Turned off = the balance is neither queried nor shown (no request to api.deepseek.com)
 prefs-deepseek-label = DeepSeek API Key

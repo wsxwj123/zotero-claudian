@@ -19,3 +19,4 @@ addon/content/chat/
 
 # 工具本地状态
 .workbuddy/
+.claude/worktrees/
