@@ -109,6 +109,9 @@ export function buildAttachmentDenySettings(
 /**
  * mcp-config JSON 内容（唯一来源）：内联回落形态与临时文件内容共用，
  * 两形态必逐字一致（`claude --mcp-config` 接受 JSON 字符串或 JSON 文件路径，实测见 `.devflow`）。
+ * R17 P9 约束：URL **不得含 `&`**（例如加第二个查询参数）。内联形态走 win32 cmd 通道时，JSON 里的
+ * `"` 会翻转 cmd.exe 的引号状态，URL 恰好落在引号外 ⇒ `&` 会被 cmd 当命令分隔符；整行引号门
+ *（cliDetect.breaksCmdQuoting）会把这种行判 ARG_BREAKS_QUOTING 拒掉（失败可见，但该轮起不来）。
  */
 export function buildMcpConfigJson(port: number, token: string): string {
   return JSON.stringify({

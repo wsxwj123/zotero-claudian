@@ -138,37 +138,66 @@ export interface RewindJournal {
 
 // ---- 落点 ----
 
-export function snapshotDir(dataDir: string, sessionId: string): string {
+/** 注入的路径拼接（真宿主 = PathUtils.join；缺省见 toJoin） */
+export type PathJoin = (...segs: string[]) => string;
+
+/**
+ * 缺省拼接：与旧模板字面量 `${a}/${b}` **逐字等价**（POSIX 形态）——只服务既有测试与老调用方。
+ * R17 P6：src 内每个调用点都必须显式传注入的 join（`src/utils/rewind.ts` 内部走 `deps.fs.join`）。
+ * 为什么必须有注入面：win32 上 `${dir}/${name}` 拼出的 `E:\x/CLAUDE.md` 会被
+ * `nsLocalFileWin::InitWithPath` 直接判为 `NS_ERROR_FILE_UNRECOGNIZED_PATH`（无容错）。
+ */
+function toJoin(join?: PathJoin): PathJoin {
+  return (
+    join ?? ((...segs: string[]) => segs.filter((s) => s !== "").join("/"))
+  );
+}
+
+export function snapshotDir(
+  dataDir: string,
+  sessionId: string,
+  /** win32 上传 PathUtils.join；缺省 = 今天的 "/" 拼法（老调用方/单测） */
+  join?: PathJoin,
+): string {
   // 信任边界（安全复查 2026-09-11）：唯一路径入口，id 必须过白名单（防 ../ 越界）
   if (!isSafeId(sessionId)) {
     throw new Error(`snapshotDir: unsafe session id: ${String(sessionId)}`);
   }
-  return `${dataDir}/${SNAPSHOT_DIR_NAME}/${sessionId}`;
+  return toJoin(join)(dataDir, SNAPSHOT_DIR_NAME, sessionId);
 }
 
 export function snapshotPath(
   dataDir: string,
   sessionId: string,
   turn: number,
+  join?: PathJoin,
 ): string {
-  return `${snapshotDir(dataDir, sessionId)}/${turn}.jsonl`;
+  return toJoin(join)(snapshotDir(dataDir, sessionId, join), `${turn}.jsonl`);
 }
 
 export function backupPath(
   dataDir: string,
   sessionId: string,
   turn: number,
+  join?: PathJoin,
 ): string {
-  return `${snapshotDir(dataDir, sessionId)}/${turn}.backup.jsonl`;
+  return toJoin(join)(
+    snapshotDir(dataDir, sessionId, join),
+    `${turn}.backup.jsonl`,
+  );
 }
 
 /** 回滚 journal 落点（数据目录内，全局唯一） */
-export function journalPath(dataDir: string): string {
-  return `${dataDir}/${SNAPSHOT_DIR_NAME}/${REWIND_JOURNAL_FILE}`;
+export function journalPath(dataDir: string, join?: PathJoin): string {
+  return toJoin(join)(dataDir, SNAPSHOT_DIR_NAME, REWIND_JOURNAL_FILE);
 }
 
-function indexPath(dataDir: string, sessionId: string): string {
-  return `${snapshotDir(dataDir, sessionId)}/index.json`;
+function indexPath(
+  dataDir: string,
+  sessionId: string,
+  join?: PathJoin,
+): string {
+  return toJoin(join)(snapshotDir(dataDir, sessionId, join), "index.json");
 }
 
 /** CLI 的项目目录名转义长度上限（CLI 2.1.267 的 `Gq=200`） */
@@ -376,7 +405,9 @@ export async function readSnapshotIndex(
 ): Promise<SnapshotIndex | null> {
   let raw: string | null;
   try {
-    raw = await deps.fs.readText(indexPath(input.dataDir, input.sessionId));
+    raw = await deps.fs.readText(
+      indexPath(input.dataDir, input.sessionId, deps.fs.join),
+    );
   } catch {
     // 读失败按「不可回滚」处理（回 null），绝不静默成空索引放行回滚
     return null;
@@ -430,7 +461,7 @@ export async function snapshotTurn(
       `snapshotTurn: unsafe session id: ${String(input.sessionId)}`,
     );
   }
-  const dir = snapshotDir(input.dataDir, input.sessionId);
+  const dir = snapshotDir(input.dataDir, input.sessionId, deps.fs.join);
   await deps.fs.makeDir(dir);
   let names: string[] = [];
   try {
@@ -442,7 +473,7 @@ export async function snapshotTurn(
   const source = input.sourcePath
     ? await deps.fs.readText(input.sourcePath)
     : null;
-  const path = snapshotPath(input.dataDir, input.sessionId, turn);
+  const path = snapshotPath(input.dataDir, input.sessionId, turn, deps.fs.join);
   await deps.fs.writeText(path, source ?? "", { mode: SNAPSHOT_FILE_MODE });
 
   const prev = await readSnapshotIndex(input, deps);
@@ -453,7 +484,7 @@ export async function snapshotTurn(
     { turn, projectDir: input.projectDir },
   ].sort((a, b) => a.turn - b.turn);
   await deps.fs.writeText(
-    indexPath(input.dataDir, input.sessionId),
+    indexPath(input.dataDir, input.sessionId, deps.fs.join),
     JSON.stringify({ claudeSessionId, snapshots }, null, 2),
     { mode: SNAPSHOT_FILE_MODE },
   );
@@ -510,7 +541,7 @@ export async function rewindToTurn(
       };
     }
     const snapshot = await deps.fs.readText(
-      snapshotPath(input.dataDir, input.sessionId, input.turn),
+      snapshotPath(input.dataDir, input.sessionId, input.turn, deps.fs.join),
     );
     if (snapshot === null) {
       return {
@@ -532,13 +563,25 @@ export async function rewindToTurn(
       sessionId: input.sessionId,
       turn: input.turn,
       originalPath: input.sourcePath,
-      backupPath: backupPath(input.dataDir, input.sessionId, input.turn),
-      snapshotPath: snapshotPath(input.dataDir, input.sessionId, input.turn),
+      backupPath: backupPath(
+        input.dataDir,
+        input.sessionId,
+        input.turn,
+        deps.fs.join,
+      ),
+      snapshotPath: snapshotPath(
+        input.dataDir,
+        input.sessionId,
+        input.turn,
+        deps.fs.join,
+      ),
     };
-    await deps.fs.makeDir(snapshotDir(input.dataDir, input.sessionId));
+    await deps.fs.makeDir(
+      snapshotDir(input.dataDir, input.sessionId, deps.fs.join),
+    );
     // ① journal 先落（里面要有备份/还原所需的一切，崩了下次启动才有得救）
     await deps.fs.writeText(
-      journalPath(input.dataDir),
+      journalPath(input.dataDir, deps.fs.join),
       JSON.stringify(journal),
       {
         mode: SNAPSHOT_FILE_MODE,
@@ -565,7 +608,7 @@ export async function rewindToTurn(
     // ⑤ 还原原文件（**任何一步失败都不许跳过**）⑥ 清 journal（还原成功才清）
     try {
       await deps.fs.writeText(input.sourcePath, original);
-      await deps.fs.remove(journalPath(input.dataDir));
+      await deps.fs.remove(journalPath(input.dataDir, deps.fs.join));
     } catch (err) {
       deps.log?.(`rewind: restore failed, journal kept: ${String(err)}`);
       return { ok: false, reason: "RESTORE_FAILED", error: String(err) };
@@ -595,7 +638,7 @@ export async function recoverPendingRewind(
   input: { dataDir: string },
   deps: RewindDeps,
 ): Promise<{ restored: boolean; error?: string }> {
-  const jp = journalPath(input.dataDir);
+  const jp = journalPath(input.dataDir, deps.fs.join);
   let raw: string | null;
   try {
     raw = await deps.fs.readText(jp);

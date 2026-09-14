@@ -7,6 +7,8 @@ import type {
   BalanceState,
   BalanceStatus,
   HostMessage,
+  InFlightInfo,
+  InFlightTurnBlock,
   SessionSummary,
   StreamEvent,
   UiMessage,
@@ -147,9 +149,30 @@ export function bypassOptionClick(
 export const CLAUDE_INSTALL_URL =
   "https://docs.claude.com/en/docs/claude-code/setup";
 
+/**
+ * 轮内的一个块。`index` = CLI 的 content_block index —— **只在同一条 CLI 消息内唯一**
+ *（每条消息从 0 重新计数，见 T11b 真形态）；`message` = 该块属于本轮第几条 CLI 消息。
+ *
+ * R17c：切回时重建的占位轮**可能含多条消息的块**（一条 assistant 轮收下整轮过程），故
+ * 每条块都要带上自己的消息序号，页内路由（delta / 工具入参 / 校准）才能只作用于**当前那条
+ * 消息**那一组 —— 否则前一条消息已定稿的正文会被当前消息的 live 事件命中并改写。
+ * live 事件新建的块不带该字段 = 属于当前消息（判据见 inCurrentMessage）。
+ */
 export type TurnBlock =
-  | { blockType: "text"; index: number; text: string; streaming: boolean }
-  | { blockType: "thinking"; index: number; text: string; streaming: boolean }
+  | {
+      blockType: "text";
+      index: number;
+      text: string;
+      streaming: boolean;
+      message?: number;
+    }
+  | {
+      blockType: "thinking";
+      index: number;
+      text: string;
+      streaming: boolean;
+      message?: number;
+    }
   | {
       blockType: "tool";
       index: number;
@@ -158,6 +181,7 @@ export type TurnBlock =
       inputJson: string;
       result: { isError: boolean; summary: string } | null;
       streaming: boolean;
+      message?: number;
     };
 
 export interface Turn {
@@ -963,22 +987,195 @@ function normalizeNoteList(raw: unknown): NoteSummary[] {
   return out;
 }
 
-/** R14 修点 1：history 回执携带的「该会话现在在跑什么」（宿主组装；缺省 = 无在途轮） */
-export interface InFlightInfo {
-  userText: string;
-  assistantText: string;
-  busy: "running" | "interrupting";
-  /** 宿主接轮时该会话已落盘的历史行数（幂等键：回放行数 <= baseRows = 这一轮还没落盘） */
-  baseRows: number;
-}
-
 /** inFlight 载荷长度上限（防坏值灌爆视图；与宿主侧同口径） */
 const IN_FLIGHT_USER_MAX = 4000;
 const IN_FLIGHT_ASSISTANT_MAX = 8000;
+/** R17 P7：在途块的单块文本上限（宿主已按同一数量级裁剪，这里是页面侧的第二道闸） */
+const IN_FLIGHT_BLOCK_TEXT_MAX = 2000;
+const IN_FLIGHT_BLOCK_SUMMARY_MAX = 500;
+
+/**
+ * R17 P7：在途块的归一（**严格**：一个元素不合法 → 整条按「无 blocks」处理）。
+ * 为什么严格：`blocks` 是占位轮的权威来源，半截的块数组会建出半截轮（缺正文 / 块序错乱），
+ * 比回落到 `assistantText` 纯文本更糟。返回 null = 调用方回落今天的纯文本占位，不抛。
+ * 硬要求：`text`/`toolName` 是字符串；tool 块必须有 `toolUseId`（否则 live `toolResult`
+ * 永远回填不到占位卡）；**`message` 必须有**（缺 = 老宿主：CLI 的 index 每条消息从 0 重新计数，
+ * 没有消息边界就无法安全分组 → 一律回落纯文本占位，宁可退到今天形态也不要跨消息串味）。
+ * `index` 缺失时按数组序补（与落盘的 `replayBlocksOf` 同风格）。
+ */
+function inFlightBlocksOf(raw: unknown): InFlightTurnBlock[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const out: InFlightTurnBlock[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const b = raw[i];
+    if (typeof b !== "object" || b === null || Array.isArray(b)) {
+      return null;
+    }
+    const rec = b as Record<string, unknown>;
+    if (typeof rec.message !== "number" || !Number.isFinite(rec.message)) {
+      return null; // 老宿主（无消息边界）→ 整条按无 blocks 处理
+    }
+    const message = Math.floor(rec.message);
+    const index =
+      typeof rec.index === "number" && Number.isFinite(rec.index)
+        ? Math.floor(rec.index)
+        : i;
+    if (rec.blockType === "text") {
+      if (typeof rec.text !== "string") {
+        return null;
+      }
+      out.push({
+        blockType: "text",
+        index,
+        message,
+        text: rec.text.slice(0, IN_FLIGHT_BLOCK_TEXT_MAX),
+      });
+      continue;
+    }
+    if (rec.blockType === "thinking") {
+      if (typeof rec.text !== "string") {
+        return null;
+      }
+      out.push({
+        blockType: "thinking",
+        index,
+        message,
+        text: rec.text.slice(0, IN_FLIGHT_BLOCK_TEXT_MAX),
+      });
+      continue;
+    }
+    if (rec.blockType === "tool") {
+      if (
+        typeof rec.toolName !== "string" ||
+        typeof rec.toolUseId !== "string"
+      ) {
+        return null;
+      }
+      const resultRaw = rec.result;
+      const result =
+        typeof resultRaw === "object" &&
+        resultRaw !== null &&
+        typeof (resultRaw as { summary?: unknown }).summary === "string"
+          ? {
+              isError: (resultRaw as { isError?: unknown }).isError === true,
+              summary: (resultRaw as { summary: string }).summary.slice(
+                0,
+                IN_FLIGHT_BLOCK_SUMMARY_MAX,
+              ),
+            }
+          : null;
+      out.push({
+        blockType: "tool",
+        index,
+        message,
+        toolUseId: rec.toolUseId,
+        toolName: rec.toolName,
+        inputJson:
+          typeof rec.inputJson === "string"
+            ? rec.inputJson.slice(0, IN_FLIGHT_BLOCK_TEXT_MAX)
+            : "",
+        result,
+      });
+      continue;
+    }
+    return null; // 白名单外的 blockType
+  }
+  return out;
+}
+
+/**
+ * R17c：轮内「当前 CLI 消息」的序号 = 轮内块上 `message` 的最大值（-1 = 还没有任何消息标记，
+ * 即纯 live 轮：所有块都属于同一条消息）。
+ * 判据只在**一条轮**内算：`messageStart` 仍按既有语义另起一条轮，所以「跨消息」只发生在
+ * 切回时重建的占位轮里（一条轮收下整轮过程块）。
+ */
+function currentMessageOf(blocks: TurnBlock[]): number {
+  let max = -1;
+  for (const b of blocks) {
+    const m = b.message;
+    if (typeof m === "number" && Number.isFinite(m) && m > max) {
+      max = m;
+    }
+  }
+  return max;
+}
+
+/**
+ * R17c：该块是否属于「当前消息」。有标记按标记比；**没有标记的块视为当前消息**
+ *（live 事件（textBlockStart/textDelta/toolBlockStart…）新建的块不带 message，天然属于当前这条）。
+ * 这一条判据就是「前一条消息的块绝不会被当前消息的 live 事件命中」的结构保证。
+ */
+function inCurrentMessage(b: TurnBlock, cur: number): boolean {
+  return b.message === undefined || b.message === cur;
+}
+
+/**
+ * R17c：先按 `message` 把一条轮切成 [上几条消息的块, 当前消息的块] 两段（同为前缀/后缀，
+ * 拼回去顺序不变 —— 块一律按到达序追加，消息天然有序）。
+ * 注意：**保持一条轮**（不再按撞车切轮）——一条 assistant 气泡收下整轮过程块是既有渲染形态
+ *（`tests/unit/r17b-p7-inflight-blocks.test.ts` 的 T-P7-c 锁着它）；跨消息的串味改由
+ * 「页内路由/校准只看当前消息那一组」解决（见 inCurrentMessage 的三处使用）。
+ */
+function splitByMessage(
+  blocks: TurnBlock[],
+  cur: number,
+): { prev: TurnBlock[]; current: TurnBlock[] } {
+  const prev: TurnBlock[] = [];
+  const current: TurnBlock[] = [];
+  for (const b of blocks) {
+    (inCurrentMessage(b, cur) ? current : prev).push(b);
+  }
+  return { prev, current };
+}
+
+/**
+ * R17 P7：在途块 → 占位块的渲染形态（**一条轮**，`index`/`message` 原样采用宿主给的值）。
+ * `index` 与后续 live `textDelta.index` 同源 ⇒ 命中即追加；`message` 让路由只作用于当前消息。
+ * streaming：整包最后一块且是 text → true（正在长的那段）；thinking 恒 false；tool 按有没有结果。
+ */
+function placeholderBlocksOf(blocks: InFlightTurnBlock[]): TurnBlock[] {
+  const last = blocks[blocks.length - 1];
+  return blocks.map((b) => {
+    if (b.blockType === "text") {
+      return {
+        blockType: "text",
+        index: b.index,
+        message: b.message,
+        text: b.text,
+        // 只有末尾那条正文还在长（前面的段已定稿）——末块是它时才算「流式中」
+        streaming: b === last,
+      };
+    }
+    if (b.blockType === "thinking") {
+      return {
+        blockType: "thinking",
+        index: b.index,
+        message: b.message,
+        text: b.text,
+        streaming: false,
+      };
+    }
+    return {
+      blockType: "tool",
+      index: b.index,
+      message: b.message,
+      toolName: b.toolName,
+      // 占位工具卡必须带真 id：live `toolResult` 按 id 回填（空串会让卡永远停在「运行中」）
+      toolUseId: b.toolUseId ?? "",
+      inputJson: b.inputJson,
+      result: b.result,
+      streaming: b.result === null,
+    };
+  });
+}
 
 /**
  * R14：inFlight 归一——非对象 / userText 非字符串或空 / busy 不在白名单 → 整条当「无 inFlight」
  * （老宿主行为逐字不变）；文本按上限截断，baseRows 非有限或负数 → 0。
+ * R17 P7：`blocks` 一并归一（**有 inFlight 必有该键**，可为空数组；缺失/非法 = 老宿主或坏值
+ * → 空数组 → 页面回落纯文本占位）。
  */
 function normalizeInFlight(value: unknown): InFlightInfo | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -1009,6 +1206,7 @@ function normalizeInFlight(value: unknown): InFlightInfo | null {
     assistantText,
     busy,
     baseRows,
+    blocks: inFlightBlocksOf(raw.blocks) ?? [],
   };
 }
 
@@ -1121,7 +1319,15 @@ function reduceHistory(
     )
   ) {
     merged = [...merged, { role: "user", text: info.userText }];
-    if (info.assistantText) {
+    // R17 P7：占位块的权威来源是 `info.blocks`（整轮块，含 text）——只按 `assistantText`
+    // 建纯文本占位会在工具轮里丢掉「已定稿的正文段」与全部过程条带（`assistantText` 只装
+    // 当前这条消息已流出的正文，messageStart/assistantMessage 都会清零）。
+    // `blocks` 为空/非法（= 老宿主或坏值）→ 回落今天的纯文本占位（行为逐字不变）。
+    const placeholder =
+      info.blocks.length > 0 ? placeholderBlocksOf(info.blocks) : null;
+    if (placeholder) {
+      merged = [...merged, { role: "assistant", blocks: placeholder }];
+    } else if (info.assistantText) {
       merged = [
         ...merged,
         {
@@ -1296,7 +1502,12 @@ export function reduceStreamEvent(
         return state; // §4.2：text 非字符串 → 丢该 delta
       }
       return updateLastAssistant(state, (blocks) =>
-        appendToBlock(blocks, event.index, "text", event.text),
+        appendToBlock(
+          blocks,
+          textDeltaTargetIndex(blocks, event.index),
+          "text",
+          event.text,
+        ),
       );
     }
     case "thinkingDelta": {
@@ -1332,13 +1543,17 @@ export function reduceStreamEvent(
       if (typeof event.jsonFragment !== "string") {
         return state;
       }
-      return updateLastAssistant(state, (blocks) =>
-        blocks.map((b) =>
-          b.blockType === "tool" && b.index === event.index
+      return updateLastAssistant(state, (blocks) => {
+        // R17c：入参只拼进**当前消息**的工具卡（上一条消息可能有同 index 的卡）
+        const cur = currentMessageOf(blocks);
+        return blocks.map((b) =>
+          b.blockType === "tool" &&
+          b.index === event.index &&
+          inCurrentMessage(b, cur)
             ? { ...b, inputJson: b.inputJson + event.jsonFragment }
             : b,
-        ),
-      );
+        );
+      });
     }
     case "toolResult": {
       if (typeof event.toolUseId !== "string") {
@@ -1480,12 +1695,18 @@ function updateLastAssistant(
   return { ...state, messages };
 }
 
+/**
+ * 轮内是否有该块（index + 类型都匹配才算同一块）。
+ * R17c：只看**当前消息那一组**——切回重建的占位轮里，上一条消息可能已有同 index 同类型的块，
+ * 若不过滤，live 事件会以为自己这一块已经存在（该建的块不建），或反过来被上一条消息顶掉。
+ */
 function hasBlock(
   blocks: TurnBlock[],
   index: number,
   type: "text" | "thinking" | "tool",
 ): boolean {
-  return blocks.some((b) => b.index === index && b.blockType === type);
+  const { current } = splitByMessage(blocks, currentMessageOf(blocks));
+  return current.some((b) => b.index === index && b.blockType === type);
 }
 
 function appendToBlock(
@@ -1494,10 +1715,12 @@ function appendToBlock(
   type: "text" | "thinking",
   text: string,
 ): TurnBlock[] {
+  const cur = currentMessageOf(blocks);
   const exists = hasBlock(blocks, index, type);
   return blocks
     .map((b) => {
-      if (b.index !== index) {
+      // R17c：只追加到当前消息那一组（上一条消息已定稿的同 index 正文块必须原样留着）
+      if (b.index !== index || !inCurrentMessage(b, cur)) {
         return b;
       }
       if (b.blockType === type) {
@@ -1511,6 +1734,26 @@ function appendToBlock(
         ? []
         : [{ blockType: type, index, text, streaming: true } as TurnBlock],
     );
+}
+
+/**
+ * R17 P7 兜底：正文 delta 的落点 index。
+ * 正常情况 = 事件自己的 index（占位块原样采用宿主给的 index，与 live delta 同源 ⇒ 命中）。
+ * 兜底（INTERFACE-R17 §1.2.1）：index **无命中**且末块是还在流的 text 块 → 追加到它，
+ * 而不是隐式另起一块（那会让同一段正文裂成两个气泡）。
+ * 只在「末块是 streaming 的 text 块」时兜底：末块是 thinking/已完成块时不猜（维持隐式建块）。
+ */
+function textDeltaTargetIndex(blocks: TurnBlock[], index: number): number {
+  // R17c：只认「当前消息那一组」（上一条消息的块不该被这条 delta 命中/兜底）
+  const { current } = splitByMessage(blocks, currentMessageOf(blocks));
+  if (current.some((b) => b.blockType === "text" && b.index === index)) {
+    return index;
+  }
+  const last = current[current.length - 1];
+  if (last && last.blockType === "text" && last.streaming) {
+    return last.index;
+  }
+  return index;
 }
 
 /** 类型化按下标取块：index 与类型都匹配才算同一块（index 相同但类型不同的块是另一条流式块） */
@@ -1533,9 +1776,12 @@ function calibrateBlocks(state: ChatState, content: unknown): ChatState {
   if (!last || last.role !== "assistant" || !last.blocks) {
     return state;
   }
-  const blocks: TurnBlock[] = last.blocks
-    .filter((b) => b != null)
-    .map((b) => ({ ...b, streaming: false }));
+  // R17c：`content[]` 是**当前这条 CLI 消息**的权威块表 ⇒ 只校准当前消息那一组；上几条消息
+  // 的块原样保留（切回重建的占位轮里它们与 content 无关，参与校准会被「只信 content 声明」
+  // 的清理整段丢掉——那正是用户报的「第一段正文消失」）。拼接顺序不变：prev 是前缀、current 是后缀。
+  const all = last.blocks.filter((b) => b != null);
+  const { prev, current } = splitByMessage(all, currentMessageOf(all));
+  const blocks: TurnBlock[] = current.map((b) => ({ ...b, streaming: false }));
   /** content 声明为 text 的 index → 文本（BUG-28/E4b 判定依据；先整体扫一遍，错位残影识别也要用） */
   const declaredTexts = new Map<number, string>();
   for (let i = 0; i < content.length; i++) {
@@ -1671,7 +1917,7 @@ function calibrateBlocks(state: ChatState, content: unknown): ChatState {
     compact.push(b);
   }
   const messages = [...state.messages];
-  messages[messages.length - 1] = { ...last, blocks: compact };
+  messages[messages.length - 1] = { ...last, blocks: [...prev, ...compact] };
   return { ...state, messages };
 }
 
@@ -1984,6 +2230,27 @@ export function followReader(
     // 裁决 A4：newSessionId !== oldSessionId && newSessionId !== null
     changed: sessionId !== state.sessionId && sessionId !== null,
   };
+}
+
+/**
+ * R17 P1-c：空绑定态的主动回填闸门（纯函数，`main.ts` 只负责调用与记账）。
+ * 背景：宿主侧推送纪律（P1-a 序号守卫）只保证「新快照赢」，不保证「页面收到过新快照」；
+ * 而 `getHistory` 的唯一发起点是「sessionId 变化」⇒ 空绑定态（`sessionId===null`）没有任何
+ * 回填触发器，界面就停在空白上不自愈。
+ * 判据（INTERFACE-R17 §1.4）：当前文献有 itemKey、本地 `sessions` 里没有任何该 itemKey 的会话、
+ * 且该 itemKey 还没请求过 ⇒ 返回该 itemKey（调用方发一次 getState）。
+ * 每个 itemKey 最多一次（去重键 = 上次请求的 itemKey），避免 getState 风暴；
+ * `reduceSessionList` 不改 `readerContext` ⇒ 不存在自激循环。
+ */
+export function needsSessionListRefresh(
+  state: ChatState,
+  lastRequestedItemKey: string | null,
+): string | null {
+  const itemKey = state.readerContext?.itemKey ?? null;
+  if (itemKey === null || itemKey === lastRequestedItemKey) {
+    return null;
+  }
+  return state.sessions.some((s) => s.itemKey === itemKey) ? null : itemKey;
 }
 
 /**

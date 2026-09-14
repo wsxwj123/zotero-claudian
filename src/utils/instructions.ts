@@ -5,8 +5,9 @@
 // 为什么（用户原话 2026-09-11）：「项目级 claude md 直接在 claudian 面板上就能新建、修改、保存是最好」。
 // Claude Code 从 cwd 逐级向上加载 CLAUDE.md，故根放通用要求、合集目录放项目要求（R6 已把 cwd 分到合集目录）。
 //
-// ponytail: 落点用 "/" 拼接（纯函数，跨平台单测口径统一）。win32 下 IOUtils/nsIFile 接受 "/" 形态路径；
-// 若 Windows 真机出现异常，改法是给 InstructionsFs 再注入一个 PathUtils.join 走原生分隔符。
+// R17 P6：落点拼接走**注入的 join**（宿主传 PathUtils.join）——win32 上 `${dir}/${name}` 拼出的
+// `E:\zhoumian/CLAUDE.md` 会被 nsLocalFileWin::InitWithPath 直接判为 NS_ERROR_FILE_UNRECOGNIZED_PATH
+//（用户真机报错原文就是这个）。缺省 = 今天的 "/" 拼法（既有测试与老调用方逐字不变）。
 
 import type { WorkspaceMode } from "./collectionWorkspace";
 
@@ -29,6 +30,9 @@ export function normalizeInstructionScope(
     : null;
 }
 
+/** 路径段拼接（真宿主 = PathUtils.join；缺省见 defaultJoin） */
+export type InstructionsJoin = (dir: string, name: string) => string;
+
 /** 文件系统注入面（真实实现走 IOUtils，sections.ts 接线；单测注入 fake fs） */
 export interface InstructionsFs {
   exists(path: string): Promise<boolean>;
@@ -37,6 +41,8 @@ export interface InstructionsFs {
   /** 不存在 → null */
   readText(path: string): Promise<string | null>;
   writeText(path: string, text: string): Promise<void>;
+  /** R17 P6：可选注入的拼接（宿主传 PathUtils.join）；缺省 = 今天的 "/" 拼法 */
+  join?: InstructionsJoin;
 }
 
 export interface ResolveInstructionsPathInput {
@@ -46,6 +52,13 @@ export interface ResolveInstructionsPathInput {
   mode: WorkspaceMode;
   /** 当前合集目录名（单段；collection 模式下由宿主现算，查不到 → null） */
   collectionDir: string | null;
+  /** R17 P6：可选注入的拼接；缺省 = 今天的 "/" 拼法（老调用方/单测逐字不变） */
+  join?: InstructionsJoin;
+}
+
+/** 缺省拼接：与旧模板字面量 `${dir}/${name}` 逐字等价（只服务老调用方与既有测试） */
+function defaultJoin(dir: string, name: string): string {
+  return `${dir}/${name}`;
 }
 
 export type InstructionsPathResult =
@@ -107,12 +120,13 @@ export function resolveInstructionsPath(
   if (!root) {
     return { ok: false, error: "工作区路径为空，无法定位指令文件" };
   }
+  const join = input.join ?? defaultJoin;
   const scope = normalizeInstructionScope(input.scope);
   if (!scope) {
     return { ok: false, error: `未知的指令作用域：${String(input.scope)}` };
   }
   if (scope === "global") {
-    return { ok: true, dir: root, path: `${root}/${INSTRUCTIONS_FILE}` };
+    return { ok: true, dir: root, path: join(root, INSTRUCTIONS_FILE) };
   }
   if (input.mode !== "collection") {
     return {
@@ -125,7 +139,7 @@ export function resolveInstructionsPath(
     return {
       ok: true,
       dir: root,
-      path: `${root}/${INSTRUCTIONS_FILE}`,
+      path: join(root, INSTRUCTIONS_FILE),
       notice:
         "当前没有可归属的分类（未在阅读文献 / 该文献不属于任何分类）→ 本次编辑的是工作区根指令",
     };
@@ -136,8 +150,8 @@ export function resolveInstructionsPath(
       error: `分类目录名非法（越界形态）：${String(input.collectionDir)}`,
     };
   }
-  const dir = `${root}/${input.collectionDir}`;
-  return { ok: true, dir, path: `${dir}/${INSTRUCTIONS_FILE}` };
+  const dir = join(root, input.collectionDir);
+  return { ok: true, dir, path: join(dir, INSTRUCTIONS_FILE) };
 }
 
 export interface ReadInstructionsInput extends ResolveInstructionsPathInput {
@@ -170,7 +184,11 @@ function errorText(err: unknown): string {
 export async function readInstructions(
   input: ReadInstructionsInput,
 ): Promise<InstructionsReadResult> {
-  const resolved = resolveInstructionsPath(input);
+  // R17 P6：拼接面显式透传（显式 join 优先，其次 fs.join；都没有 = 缺省的 "/" 拼法）
+  const resolved = resolveInstructionsPath({
+    ...input,
+    join: input.join ?? input.fs.join,
+  });
   const scope = normalizeInstructionScope(input.scope) ?? "global";
   if (!resolved.ok) {
     return {
@@ -224,7 +242,10 @@ export async function saveInstructions(
   input: SaveInstructionsInput,
 ): Promise<InstructionsSavedResult> {
   const scope = normalizeInstructionScope(input.scope) ?? "global";
-  const resolved = resolveInstructionsPath(input);
+  const resolved = resolveInstructionsPath({
+    ...input,
+    join: input.join ?? input.fs.join,
+  });
   if (!resolved.ok) {
     return { scope, ok: false, error: resolved.error };
   }

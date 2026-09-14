@@ -646,7 +646,11 @@ export type Win32CmdInvocation =
   | {
       ok: false;
       code: "SPAWN_FAILED";
-      reason: "ARG_HAS_NEWLINE" | "ARG_HAS_PERCENT" | "CMD_LINE_TOO_LONG";
+      reason:
+        | "ARG_HAS_NEWLINE"
+        | "ARG_HAS_PERCENT"
+        | "ARG_BREAKS_QUOTING"
+        | "CMD_LINE_TOO_LONG";
       limit?: number;
     };
 
@@ -671,7 +675,9 @@ export type Win32CmdInvocation =
  * 安全边界（写死不省）：
  * - 任一参数（含 exe 路径）含 \n/\r → 拒绝（cmd.exe 在换行处截断命令，PLAN §2.10 B.4）；
  * - 参数含 % → 拒绝（批处理层展开变量，拒绝优于转义猜测，PLAN §2.10 B.3）；
+ * - 组装后整行按 cmd.exe 引号状态扫一遍，`& | < > ^` 落在引号外 → 拒绝（R17 P9，见 breaksCmdQuoting）；
  * - 组装后整行 > 8191 字符 → 拒绝并报实际上限（PLAN §2.10 B.5）。
+ * 检查顺序：换行 → % → 引号 → 超长（注入尝试报安全原因，不被超长原因盖住）。
  * prompt 恒走 stdin 不进参数，上列限制天然不适用（PLAN §2.3/§2.10 B）。
  * 注：cmdExePath 本身不在「整行」内（它是进程 argv[0]），故与换行/百分号门无关。
  */
@@ -689,6 +695,9 @@ export function buildWin32CmdInvocation(
     return { ok: false, code: "SPAWN_FAILED", reason: "ARG_HAS_PERCENT" };
   }
   const commandLine = all.map(quoteWinArg).join(" ");
+  if (breaksCmdQuoting(commandLine)) {
+    return { ok: false, code: "SPAWN_FAILED", reason: "ARG_BREAKS_QUOTING" };
+  }
   if (commandLine.length > CMD_LINE_LIMIT) {
     return {
       ok: false,
@@ -698,6 +707,27 @@ export function buildWin32CmdInvocation(
     };
   }
   return { ok: true, file: cmdExePath, args: ["/C", commandLine] };
+}
+
+/**
+ * R17 P9：模拟 cmd.exe 对**整行**的引号状态——遇 `"` 翻转，`& | < > ^` 任一落在引号外即判「打破引号」。
+ * 为什么整行、不逐参数：cmd.exe 的引号状态整行共享，一个奇数引号参数会翻转它后面所有参数
+ *（`Bash(a"b *)` + `Bash(x&calc *)` 单看都无害，合行后 `&` 落在引号外）。
+ * 为什么每个 `"` 都翻转：`\"` 是 CRT 规则，cmd.exe 不认 ⇒ quoteWinArg 产出的 `\"` 在 cmd 眼里仍是引号。
+ * `^` 在集合里：引号外的 `^` 是 cmd 转义符，`^"` 能让引号不翻转、骗过本判据 ⇒ 引号外一律拒。
+ * 不能「直接拒含 `"` 的参数」：内联 `--mcp-config` JSON 本来就带 `"`（锁定 win32-spawn.test.mjs:38-47），
+ * 它能过是因为 JSON 里没有元字符。行尾停在引号内不算破坏（锁定形态 `a\"b`）。
+ */
+function breaksCmdQuoting(line: string): boolean {
+  let inQuote = false;
+  for (const ch of line) {
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (!inQuote && "&|<>^".includes(ch)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

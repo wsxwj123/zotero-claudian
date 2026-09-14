@@ -99,6 +99,49 @@ export type StreamEvent =
       reason?: string;
     };
 
+/**
+ * R17 P7：在途轮的**整轮块**（`history.inFlight.blocks` 的元素形态）。
+ * - 含 `text` 块（与落盘块形态的唯一差别：落盘行的正文在那行的 `text` 字段里，块只有过程块）；
+ * - `index` 一律带（= CLI 的 content_block index，与 live `textDelta.index` 同源 —— 页面占位
+ *   块靠它命中后续 delta）；
+ * - `message` = 本轮内的 CLI 消息序号（`messageStart` 递增）。**`index` 只在同一条消息内唯一**
+ *   ——CLI 的 content_block index **每条消息从 0 重新计数**（真形态见
+ *   `tests/unit/r14-host-inflight.test.ts` 的 T11b：两段正文都 `index:0`）。缺它 = 老宿主，
+ *   页面一律回落纯文本占位（宁可退到今天形态，也不要跨消息串味）。
+ * - tool 块的 `toolUseId`：live `toolResult` 按 id 命中回填，缺了它占位卡永远停在「运行中」。
+ * - 上限口径与落盘同一套（`TURN_BLOCK_TEXT_MAX` / `TURN_BLOCK_SUMMARY_MAX` / 32 KB 预算）。
+ * `message`/`toolUseId` 标可选只为让**老页面**忽略未知键；**新宿主恒带**。
+ */
+export type InFlightTurnBlock =
+  | { blockType: "text"; index: number; message?: number; text: string }
+  | { blockType: "thinking"; index: number; message?: number; text: string }
+  | {
+      blockType: "tool";
+      index: number;
+      message?: number;
+      toolUseId?: string;
+      toolName: string;
+      inputJson: string;
+      result: { isError: boolean; summary: string } | null;
+    };
+
+/**
+ * R14/R17：该会话当前在途轮（宿主是唯一真相）。两个下发时机共用同一份数据
+ *（换绑定的 getHistory 回执、开轮的 send 广播）。
+ * R17：**有 `inFlight` 必有 `blocks`**（可以是空数组——开轮那一刻还没流出任何块）；
+ * `blocks` 缺失的唯一合法解释 = 老宿主。`assistantText` 语义照旧（当前这条消息已流出的正文，
+ * 不许改成跨消息拼接）。
+ */
+export interface InFlightInfo {
+  userText: string;
+  assistantText: string;
+  busy: "running" | "interrupting";
+  /** 宿主接轮时该会话已落盘的历史行数（幂等键：回放行数 <= baseRows = 这轮还没落盘） */
+  baseRows: number;
+  /** R17 P7：本轮已流出的整轮块（text/thinking/tool）；有 inFlight 必有该键（可空数组） */
+  blocks: InFlightTurnBlock[];
+}
+
 /** §4.5 会话索引记录中 UI 关心的子集 */
 export interface SessionSummary {
   id: string;
@@ -181,13 +224,7 @@ export type HostMessage =
        * R14：该会话当前在途轮（宿主是唯一真相）。两个下发时机：换绑定时 handleGetHistory 的
        * 回执、开轮时 handleSend 的广播。缺省 = 无在途轮（老宿主不带该键，UI 行为逐字不变）。
        */
-      inFlight?: {
-        userText: string;
-        assistantText: string;
-        busy: "running" | "interrupting";
-        /** 宿主接轮时该会话已落盘的历史行数（幂等键：回放行数 <= baseRows = 这轮还没落盘） */
-        baseRows: number;
-      };
+      inFlight?: InFlightInfo;
     }
   /**
    * 输入历史（↑/↓ 翻已发送消息）的持久化回推：宿主落盘 <profile>/claudian/input-history.json，

@@ -3,7 +3,7 @@ import { render } from "preact";
 import { h } from "preact";
 import { App, ChatStore } from "./App";
 import { BridgeClient, recordDiag, shouldUseMock } from "./lib/bridgeClient";
-import { reduceHostMessage } from "./lib/chatModel";
+import { needsSessionListRefresh, reduceHostMessage } from "./lib/chatModel";
 import {
   createBridgeHistoryStorage,
   setDefaultHistoryStorage,
@@ -42,6 +42,8 @@ const store = new ChatStore();
 const mock = shouldUseMock();
 // 排障留痕：connected 每次翻转记一条——用于区分「reduce 没跑到」「DOM 没跟上」两类故障
 let lastConnected: boolean | null = null;
+/** R17 P1-c：上次主动 getState 用的 itemKey（每个 itemKey 最多请求一次，判定在 chatModel 里） */
+let lastStateReqKey: string | null = null;
 const bridge = new BridgeClient(
   (msg) => {
     const prev = store.get();
@@ -63,6 +65,15 @@ const bridge = new BridgeClient(
       // 输入历史（↑/↓ 翻已发送消息）同一时机拉：宿主落盘的那份由 inputHistory 消息推回，
       // InputBox 并入本会话桶（面板重载后 ↑ 还能翻到旧消息，走的就是这条）
       bridge.send({ type: "getInputHistory", sessionId: next.sessionId });
+    }
+    // R17 P1-c：空绑定态回填——切到「还没有会话」的文献时，本地列表里没有该 itemKey 的会话
+    // （可能是宿主抛过旧快照 / 索引变更的推送丢过），主动要一次 getState（每个 itemKey 一次）。
+    // 判定不在这里：needsSessionListRefresh 是具名纯函数（有单测）。
+    const wantState = needsSessionListRefresh(next, lastStateReqKey);
+    if (wantState) {
+      lastStateReqKey = wantState;
+      recordDiag(`ui.sessionList refresh requested for ${wantState}`);
+      bridge.send({ type: "getState" });
     }
     if (next.connected !== lastConnected) {
       lastConnected = next.connected;

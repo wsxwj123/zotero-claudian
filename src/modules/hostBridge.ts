@@ -28,11 +28,13 @@ import {
 import type {
   BalanceStatus,
   HostMessage,
+  InFlightInfo,
+  InFlightTurnBlock,
   SessionSummary,
 } from "../chat/lib/types";
 import { addUsage, type UsageStats } from "../chat/lib/usage";
 import { SCOPE_ITEMS_MAX, SCOPE_SELECTION_LABEL } from "../utils/scope";
-import { buildRememberRule } from "../utils/rememberRule";
+import { buildRememberRule, isSafeRememberRule } from "../utils/rememberRule";
 import type {
   InstructionsReadResult,
   InstructionsSavedResult,
@@ -49,6 +51,7 @@ import {
   type CommandEntry,
 } from "../utils/commands";
 import { DIAG_HEADER } from "../utils/diag";
+import { createSeqGuard } from "../utils/seqGuard";
 import type { ResolvedScope, ScopeKind } from "../utils/scope";
 import {
   sanitizeAttachmentName,
@@ -212,8 +215,12 @@ export interface HostBridgeDeps {
   ): ResolvedPermission | null;
   getDefaultPermissionMode(): PermissionMode;
   spawnTurn(options: SpawnTurnOptions): TurnHandle;
-  /** hello 注册完成后向实例广播 readerContext（§4.6 宿主→UI 表；返回 null 跳过） */
-  buildReaderContext(): Promise<HostMessage | null>;
+  /**
+   * hello 注册完成后向实例补推 readerContext（§4.6 宿主→UI 表；返回 null 跳过）。
+   * R17 P4：形参多一个可选 win——宿主按「实例所在标签页」取那一份（sections.ts 的
+   * buildReaderContextFor）；不传 = 今天的全局语义（老宿主/测试的零参写法仍兼容）。
+   */
+  buildReaderContext(win?: UiWindowKey): Promise<HostMessage | null>;
   /** 会话索引与旁挂历史（§4.5；纯逻辑模块，宿主侧注入 IOUtils 实现） */
   sessions: SessionStore;
   /**
@@ -347,10 +354,19 @@ export interface PickedFile {
 /**
  * R14 修点 3：本轮流式过程块的宿主侧累加器（onTurnEvent 逐事件攒，finishTurn 成品化落盘）。
  * index 是 content_block 的 index（每个 messageStart 重新计数），归并一律「取最后一个匹中的」。
+ * R17 P7：kind 多一个 "text"——正文块只活在内存（供 `inFlight.blocks`），**不落盘**
+ *（finalizeTurnBlocks 显式跳过）。
  */
 interface TurnBlockAcc {
-  kind: "thinking" | "tool";
+  kind: "thinking" | "tool" | "text";
+  /** content_block 的 index（**每条 assistant 消息重新计数** → 归并键是下面的 message + index） */
   index: number;
+  /**
+   * R17 P7：第几条 assistant 消息（messageStart 递增）。只有 text 块用得上它：
+   * 正文块必须按 (message, index) 归并——同一个 index 在两条消息里都会出现，只按 index 归并
+   * 会把跨消息的正文拼成一句（PLAN-R14 失败模式 E 杂糅句）。
+   */
+  message: number;
   text: string;
   toolName: string;
   toolUseId: string;
@@ -380,33 +396,61 @@ function clipTurnBlockText(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-/** 累加器 → 落盘成品：逐块截断、空思考块丢弃、超整轮预算即停止收集（后续块不落盘） */
-function finalizeTurnBlocks(accs: TurnBlockAcc[]): PersistedTurnBlock[] {
-  const out: PersistedTurnBlock[] = [];
+/**
+ * 累加器 → 成品块：逐块截断、空思考块丢弃、超整轮预算即停止收集（后续块不落盘）。
+ * `keepText=false`（落盘）：正文块跳掉——落盘行的正文在那行的 `text` 字段里，**落盘格式逐字不变**
+ *（R14 T8/T9/T14 与 r14-blocks-persist 五例都锁着这一点）。
+ * `keepText=true`（在途占位）：正文块保留，并带上 `message`（本轮消息序号）与 tool 的
+ * `toolUseId`——前者让页面能把块按消息分组（index 每条消息从 0 重新计数），后者让占位工具卡
+ * 收得到 live `toolResult`（按 id 命中）。
+ */
+function turnBlocksOf(
+  accs: TurnBlockAcc[],
+  keepText: boolean,
+): InFlightTurnBlock[] {
+  const out: InFlightTurnBlock[] = [];
   let used = 0;
   for (const acc of accs) {
-    const item: PersistedTurnBlock =
-      acc.kind === "thinking"
-        ? {
-            blockType: "thinking",
-            text: clipTurnBlockText(acc.text, TURN_BLOCK_TEXT_MAX),
-          }
-        : {
-            blockType: "tool",
-            toolName: acc.toolName,
-            inputJson: clipTurnBlockText(acc.inputJson, TURN_BLOCK_TEXT_MAX),
-            result: acc.result
-              ? {
-                  isError: acc.result.isError,
-                  summary: clipTurnBlockText(
-                    acc.result.summary,
-                    TURN_BLOCK_SUMMARY_MAX,
-                  ),
-                }
-              : null,
-          };
-    if (item.blockType === "thinking" && !item.text.trim()) {
-      continue; // 本机 CLI 思考文本常为空：空思考块不落盘（回放里是个纯占位）
+    let item: InFlightTurnBlock;
+    if (acc.kind === "text") {
+      if (!keepText || !acc.text) {
+        continue; // 落盘不要正文块；还没流出正文的空块也不占位
+      }
+      item = {
+        blockType: "text",
+        index: acc.index,
+        message: acc.message,
+        text: clipTurnBlockText(acc.text, TURN_BLOCK_TEXT_MAX),
+      };
+    } else if (acc.kind === "thinking") {
+      const text = clipTurnBlockText(acc.text, TURN_BLOCK_TEXT_MAX);
+      if (!text.trim()) {
+        continue; // 本机 CLI 思考文本常为空：空思考块不落盘、也不占位
+      }
+      item = {
+        blockType: "thinking",
+        index: acc.index,
+        message: acc.message,
+        text,
+      };
+    } else {
+      item = {
+        blockType: "tool",
+        index: acc.index,
+        message: acc.message,
+        toolUseId: acc.toolUseId,
+        toolName: acc.toolName,
+        inputJson: clipTurnBlockText(acc.inputJson, TURN_BLOCK_TEXT_MAX),
+        result: acc.result
+          ? {
+              isError: acc.result.isError,
+              summary: clipTurnBlockText(
+                acc.result.summary,
+                TURN_BLOCK_SUMMARY_MAX,
+              ),
+            }
+          : null,
+      };
     }
     const size = utf8Bytes(JSON.stringify(item));
     if (used + size > TURN_BLOCKS_BUDGET) {
@@ -414,6 +458,28 @@ function finalizeTurnBlocks(accs: TurnBlockAcc[]): PersistedTurnBlock[] {
     }
     used += size;
     out.push(item);
+  }
+  return out;
+}
+
+/**
+ * 落盘成品（**只有过程块**）：从成品块投影出磁盘形态——`index`/`message`/`toolUseId` 是
+ * 在途占位专用字段，落盘行不带（R14 逐字锁着落盘形状）。
+ */
+function finalizeTurnBlocks(accs: TurnBlockAcc[]): PersistedTurnBlock[] {
+  const out: PersistedTurnBlock[] = [];
+  for (const b of turnBlocksOf(accs, false)) {
+    if (b.blockType === "thinking") {
+      out.push({ blockType: "thinking", text: b.text });
+    } else if (b.blockType === "tool") {
+      out.push({
+        blockType: "tool",
+        toolName: b.toolName,
+        inputJson: b.inputJson,
+        result: b.result,
+      });
+    }
+    // text 块不会出现在这里（keepText=false）
   }
   return out;
 }
@@ -440,8 +506,10 @@ interface SessionRuntime {
   curText: string;
   /** R14：本轮被接受时该会话的已落盘历史行数（inFlight 幂等键，见 PLAN-R14 修点 2） */
   baseRows: number;
-  /** R14 修点 3：本轮过程块累加器（落盘后回放轮才有条带） */
+  /** R14 修点 3：本轮过程块累加器（落盘后回放轮才有条带）；R17 起还装 text 块（只给在途占位） */
   turnBlocks: TurnBlockAcc[];
+  /** R17 P7：当前是第几条 assistant 消息（messageStart 递增；text 块的归并键之一） */
+  messageSeq: number;
   /**
    * R4-3：本轮 assistantMessage 逐条累加的用量（result 无 usage 时的兜底）。
    * result 到达即清空（该轮收尾）；不参与 index 以外的任何逻辑。
@@ -580,6 +648,11 @@ export interface HostBridge {
   permissionSettled(requestId: string): void;
   /** 实例注销（section onDestroy / tab onClose）：移出 pending 与注册表 */
   unregister(win: UiWindowKey): void;
+  /**
+   * R17 P4：当前已注册实例的窗口列表（**拷贝**；遍历期间注册表可变）。用于按实例定向投递
+   *（readerContext 每实例收自己标签页的那一份）。空 = 没有实例可投（插件停用/无面板）。
+   */
+  instances(): UiWindowKey[];
   /** 会话运行时快照（测试与宿主日志用）；未知会话 → null */
   getRuntime(sessionId: string): SessionRuntimeSnapshot | null;
 }
@@ -599,6 +672,10 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
   const runtimes = new Map<string, SessionRuntime>();
 
   const helloTimeoutMs = deps.helloTimeoutMs ?? 30_000;
+  /** R17 P1：sessionList 推送序号（pushSessionList 是唯一出口，见该函数注释） */
+  const sessionListGuard = createSeqGuard();
+  /** R17 P3：宿主同步点耗时超过这个毫秒数才记一条（避免刷屏） */
+  const SLOW_OP_MS = 20;
 
   /** 索引写失败只记日志不抛（数据安全路径：静默失败比报错更危险，但也不能掀翻桥上协议） */
   function persist(promise: Promise<unknown>): void {
@@ -620,6 +697,20 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       cleanup(path);
     } catch (err) {
       deps.log(`[bridge] ${label} cleanup failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * R17 P3：宿主同步点耗时埋点（**只观测**）。超阈值才记一条，避免刷屏。
+   * 用 `Date.now()` 而不是 `deps.now()`：后者是注入的「业务时钟」（测试里是固定值），量不了耗时。
+   */
+  function logSlow(
+    op: "readHistory" | "spawn" | "sessionList",
+    startedAt: number,
+  ): void {
+    const ms = Date.now() - startedAt;
+    if (ms >= SLOW_OP_MS) {
+      deps.log(`[bridge] slow ${op} ${ms}ms`);
     }
   }
 
@@ -723,6 +814,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         curText: "",
         baseRows: 0,
         turnBlocks: [],
+        messageSeq: 0,
         turnUsage: null,
       };
       runtimes.set(id, rt);
@@ -735,13 +827,13 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
    * handleSend 的开轮广播。只读 runtime（不新建）；判据同时要求 busy 与 pendingUserText
    * 非空（finishTurn 里 pendingUserText 挪到落盘之后才清，见该函数——真正的挡板在 UI 侧
    * 的 baseRows 行数键，这里只是第一道闸）。
+   *
+   * R17 P7：多带一个 `blocks`（整轮块，含 text 块）——它是「切走再切回」时的**权威占位源**：
+   * `assistantText` 只装当前这条消息已流出的正文（`messageStart` / `assistantMessage` 都会清），
+   * 工具轮执行的那几秒里恒为空，页面据此不建占位 ⇒ 正文与过程条带全丢。两条路径共用本函数，
+   * 任何只改一条的实现都是半修（T-P7-a2 锁）。**有 inFlight 必有 blocks**（可为空数组）。
    */
-  function inFlightOf(sessionId: string): {
-    userText: string;
-    assistantText: string;
-    busy: "running" | "interrupting";
-    baseRows: number;
-  } | null {
+  function inFlightOf(sessionId: string): InFlightInfo | null {
     const rt = runtimes.get(sessionId);
     return rt?.busy && rt.pendingUserText
       ? {
@@ -749,12 +841,14 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           assistantText: rt.curText,
           busy: rt.busy,
           baseRows: rt.baseRows,
+          blocks: turnBlocksOf(rt.turnBlocks, true),
         }
       : null;
   }
 
   /** sessionList 消息：全量索引 + 条目标题解析（§4.6 宿主→UI 表） */
   async function sessionListMessage(): Promise<HostMessage> {
+    const startedAt = Date.now(); // R17 P3：同步点耗时埋点（超阈值才记）
     const sessions: SessionSummary[] = [];
     /** R7-K：同一 itemKey 只查一次（列表每次推送都查一轮，条目多了很亏） */
     const itemCache = new Map<
@@ -812,6 +906,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         ...(rec.usage ? { usage: rec.usage } : {}),
       });
     }
+    logSlow("sessionList", startedAt);
     return {
       type: "sessionList",
       sessions,
@@ -850,9 +945,29 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     deps.sessionsExpanded.set(msg.expanded === true);
   }
 
+  /**
+   * R17 P1：会话列表推送（**唯一出口**——`sessionListMessage()` 只在这里被消费）。
+   * 序号守卫：取数是异步的（每条会话一次 lookupItem），并发是常态（≥12 个调用点），
+   * 先发起的可能后完成 → 旧快照覆盖新快照 → 页面上「有会话却被解绑」。
+   * 契约（INTERFACE-R17 §1.3）：**对任一实例，后发起的快照一定不被先发起的覆盖**
+   *（⇒ 收到的最后一条 sessionList 就是宿主最新索引的全量快照）。
+   *
+   * 为什么握手也走这里而不是自己 sendTo：守卫的「丢旧留新」只有在**所有出口都是广播**时
+   * 才等价于「新的覆盖旧的」。若握手直发也参与守卫，握手取数一旦超越并发中的广播，
+   * 就会只单播给新实例并把那次广播判为过期丢弃 ⇒ 其余已注册实例永远收不到那次索引变更
+   *（T-P1-a2 锁死「单次不被吞」、T-P1-a3 锁死「握手不饿死其他实例」）。
+   * hello 分支里 `registry.set(win, pended)` 是同步的、早于本 await ⇒ 新实例必在收件人里；
+   * 其余实例收到重复快照无副作用（reduceSessionList 对同一份列表幂等）。
+   */
   async function pushSessionList(): Promise<void> {
+    const isLatest = sessionListGuard.begin();
     try {
-      broadcast(await sessionListMessage());
+      const msg = await sessionListMessage();
+      if (!isLatest()) {
+        deps.log("[bridge] sessionList push superseded → dropped");
+        return;
+      }
+      broadcast(msg);
     } catch (err) {
       deps.log(`[bridge] sessionList build failed: ${String(err)}`);
     }
@@ -1093,6 +1208,8 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       case "messageStart":
         // R14：新的一条 assistant 消息开始——curText 只装「当前这条」已流出的正文
         rt.curText = "";
+        // R17 P7：index 每条消息重新计数 → 正文块的归并键要带上消息序号
+        rt.messageSeq += 1;
         break;
       case "assistantMessage":
         // content[] 为权威最终文本；工具轮（无文本块）不覆盖上一段有文本的
@@ -1105,12 +1222,37 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           rt.turnUsage = addUsage(rt.turnUsage, event.usage);
         }
         break;
-      case "textDelta":
+      case "textDelta": {
         // assistantMessage 缺失（丢帧）时的兜底文本
         rt.streamText += event.text;
         // R14：当前这条消息的已流出正文（在途轮占位用）
         rt.curText += event.text;
+        // R17 P7：同一段正文再攒进「整轮块」——它是切走再切回时的权威占位源
+        //（curText 会被 messageStart / assistantMessage 清零，工具轮里恒空）
+        const acc = [...rt.turnBlocks]
+          .reverse()
+          .find(
+            (b) =>
+              b.kind === "text" &&
+              b.index === event.index &&
+              b.message === rt.messageSeq,
+          );
+        if (acc) {
+          acc.text += event.text;
+        } else {
+          rt.turnBlocks.push({
+            kind: "text",
+            index: event.index,
+            message: rt.messageSeq,
+            text: event.text,
+            toolName: "",
+            toolUseId: "",
+            inputJson: "",
+            result: null,
+          });
+        }
         break;
+      }
       case "thinkingDelta": {
         // R14 修点 3：思考文本攒一份（落盘 → 回放轮的条带）
         const acc = rt.turnBlocks.find(
@@ -1122,6 +1264,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           rt.turnBlocks.push({
             kind: "thinking",
             index: event.index,
+            message: rt.messageSeq,
             text: event.text,
             toolName: "",
             toolUseId: "",
@@ -1136,6 +1279,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         rt.turnBlocks.push({
           kind: "tool",
           index: event.index,
+          message: rt.messageSeq,
           text: "",
           toolName: event.toolName,
           toolUseId: event.toolUseId,
@@ -1188,7 +1332,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       case "procError": {
         // 复查修-4：同 resultError——该轮以进程错误收场，累计用量属于这一轮，不得漏给下一轮
         rt.turnUsage = null;
-        // 命令组装失败（ARG_HAS_NEWLINE / ARG_HAS_PERCENT / CMD_LINE_TOO_LONG）带 reason 直落日志：
+        // 命令组装失败（ARG_HAS_NEWLINE / ARG_HAS_PERCENT / ARG_BREAKS_QUOTING / CMD_LINE_TOO_LONG）带 reason 直落日志：
         // 用户报障时凭这条定位「CLI 进程异常退出」的真实原因（§2.10 B）
         if (event.reason) {
           deps.log(
@@ -1443,6 +1587,15 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       return;
     }
     let record = resolveSendTarget(msg.sessionId);
+    /**
+     * R17 P8：本轮是否需要重推会话列表（**只在列表内容真的变了才推**）。
+     * 为什么不能每次 send 都推：`sessionListMessage()` 对**每条**会话都要一次 `readSnapshotIndex`
+     * （逐条读盘）+ 每个 itemKey 一次 `lookupItem`，再整包广播给所有实例、页面整份重归约 ——
+     * 每次 send 无条件推会与 P2 省下的那次整文件读直接对冲，还把 send 卡在列表构建上。
+     * 置位点（写死）：created（新建会话）/ 标题首写 / itemKey·libraryID·attachmentKey 变更 /
+     * 两处早退兜底（推送点见下方）。`finishTurn` 那处不参与标志（messageCount/用量每轮都变）。
+     */
+    let listDirty = false;
     if (record === "gone") {
       // UI 拿着一个不存在的会话（他处已删）：按 §4.6 失效语义处理，并推列表让 UI 重新绑定
       const staleId = String(msg.sessionId);
@@ -1461,13 +1614,18 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       record = await deps.sessions.create({
         title: text.slice(0, SESSION_TITLE_MAX),
       });
+      // R17 P8：这里**不再**立刻推列表——那一刻归属（itemKey）还没落定，推出去的载荷里
+      // itemKey=null ⇒ 页面「未绑定 → 绑全量最新」会绑到别的文献的会话。只置脏，推送点后移到
+      // 本函数里「归属落定」之后（见下方 `listDirty` 的消费点）。
       deps.log(`[bridge] session auto-created: ${record.id}`);
-      await pushSessionList(); // UI 据此绑定新会话 id
+      listDirty = true;
     } else if (!record.title) {
+      // 标题首写（会话首次有名字）→ 列表上的显示会变 → 置脏
       record =
         (await deps.sessions.update(record.id, {
           title: text.slice(0, SESSION_TITLE_MAX),
         })) ?? record;
+      listDirty = true;
     }
     const sessionId = record.id;
 
@@ -1491,25 +1649,22 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     rt.curText = "";
     rt.baseRows = deps.sessions.get(sessionId)?.messageCount ?? 0;
     rt.turnBlocks = [];
-    // R14 修点 4：开轮那一刻广播一次现成的 history（带 inFlight）——同一会话绑在多个页面上时，
+    rt.messageSeq = 0;
+    // R14 修点 4 / R17 P2：开轮那一刻广播一次 history（带 inFlight）——同一会话绑在多个页面上时，
     // 非发送方实例 sessionId 不变、永远不拉历史，靠这条把「在途轮」送达。一轮一次（busy="running"
-    // 全仓唯一写入点就是上面那行）。读盘失败只记日志，绝不影响本轮发送。
-    void (async () => {
-      try {
-        const messages = await deps.sessions.readHistory(sessionId);
-        const f = inFlightOf(sessionId);
-        broadcast({
-          type: "history",
-          sessionId,
-          messages,
-          ...(f ? { inFlight: f } : {}),
-        });
-      } catch (err) {
-        deps.log(
-          `[bridge] in-flight history broadcast failed (${sessionId}): ${String(err)}`,
-        );
-      }
-    })();
+    // 全仓唯一写入点就是上面那行）。
+    // R17 P2 收紧内容口径：`messages` **恒为 []**，不再读盘夹带历史行——能应用这条广播的实例
+    // 必然 `state.sessionId === msg.sessionId`，而绑定那一刻必发 `getHistory`（main.ts），
+    // 那份回执才是历史同步的唯一载体（本地视图为空的档靠它补齐）。
+    // 顺带省掉每次 send 的一次整文件读 + 逐行 JSON.parse。
+    // 同步只读（inFlightOf 只碰 runtimes；broadcast 逐实例自带死实例兜底），不需要 try/catch。
+    const f = inFlightOf(sessionId);
+    broadcast({
+      type: "history",
+      sessionId,
+      messages: [],
+      ...(f ? { inFlight: f } : {}),
+    });
     /** 本轮端点凭据：spawn 失败/进程退出都要撤销（§4.8 token 随该轮作废） */
     let mcp: { port: number; token: string } | null = null;
     /** 本轮附件目录写保护文件（spawn 失败/进程退出都要清理） */
@@ -1539,6 +1694,33 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           ? { files: attachFiles, sessionId, turn: attachTurn }
           : null,
       );
+      // R17 P8：会话归属（条目绑定）**在下面任何早退之前**落定（§2.4 条目分组：随本轮上下文刷新，
+      // 切文献后续接旧会话时更新为当前条目）。为什么必须提前：`latestSessionFor` / `followReader`
+      // 的闸门都是「itemKey 精确匹配」，而 `itemKey` 一旦没写进去，这条会话永远跟不过去
+      //（用户报的「切到 B 侧栏还是 A 的会话」）。修前它排在 `!base.command` 早退与 spawn 失败
+      // 之后 ⇒ 那两条路径上的会话永久停在无归属。
+      // 只在 lookupItem 返回真值时写（取不到条目不猜、不写空串，T-P8-d 锁）；写失败只记日志。
+      if (
+        input.itemKey &&
+        (record.itemKey !== input.itemKey ||
+          record.attachmentKey !== input.attachmentKey)
+      ) {
+        const info = await deps.lookupItem(input.itemKey);
+        if (info) {
+          record =
+            (await deps.sessions.update(sessionId, {
+              itemKey: input.itemKey,
+              itemLibraryID: info.libraryID,
+              attachmentKey: input.attachmentKey,
+            })) ?? record;
+          listDirty = true; // 归属（条目分组）变了 → 列表上的分组/标题要跟着变
+        }
+      }
+      // 归属落定 → 只有列表真变了才推（自动建会话那条推送点就落在这里）：
+      // 「包含该新会话的那条 sessionList」推送那一刻 itemKey 必须已就位
+      if (listDirty) {
+        await pushSessionList();
+      }
       // 落盘回执（UI 据此把绝对路径存进该条消息、把被拒的标出来）——回执失败不影响这一轮。
       // 已落盘的文件**再登记一枚一次性凭据**回给 UI：编辑重发时 UI 只回传它（路径不回传）。
       const saved = (input.attachmentSaved?.saved ?? []).map((s) => {
@@ -1580,24 +1762,13 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           message: "claude CLI 未找到，请安装或在设置中指定 cliPathOverride",
           sessionId,
         });
+        // R17 P8：早退兜底推一次——自动建会话/标题首写这一刻还没推过（上面的推送点在本行之后），
+        // 不推的话 UI 连「刚建的那条会话」都看不到（会话已建出并已落定归属，如实推）。
+        await pushSessionList();
         return;
       }
-      // 会话绑定条目（§2.4 条目分组）：随本轮上下文刷新（切文献后续接旧会话时更新为当前条目）
-      if (
-        input.itemKey &&
-        (record.itemKey !== input.itemKey ||
-          record.attachmentKey !== input.attachmentKey)
-      ) {
-        const info = await deps.lookupItem(input.itemKey);
-        if (info) {
-          record =
-            (await deps.sessions.update(sessionId, {
-              itemKey: input.itemKey,
-              itemLibraryID: info.libraryID,
-              attachmentKey: input.attachmentKey,
-            })) ?? record;
-        }
-      }
+      // R17 P8：会话绑定条目（§2.4 条目分组）的写入点已前移到 buildTurnPrompt 之后
+      //（见上方注释：早退路径也要先落定归属，否则那些会话永远被 latestSessionFor 拒之门外）
       // 端点故障（起监听失败/端口占用）→ 抛出 → 下方 catch 回 SPAWN_FAILED，该轮不 spawn（§4.8）
       mcp = await deps.getMcpEndpoint(sessionId);
       // 一次性 token 不进 argv：写 0600 临时文件传路径；写失败 → null → 回落内联 JSON（可用性优先）
@@ -1673,6 +1844,15 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         return;
       }
 
+      // R17 P9：旧数据过滤——会话里可能存着修前记住的不安全规则（首词带 `"&…&"` 等，会在 win32
+      // cmd 通道被当命令执行）。进 argv 前按**同一个**判定函数过滤（与生成器同源，不写第二份）。
+      // 不回写索引：旧规则留在磁盘上保持惰性、每轮在这里被挡掉；只在确有丢弃时记一条日志。
+      const safeTools = record.allowedTools.filter(isSafeRememberRule);
+      if (safeTools.length !== record.allowedTools.length) {
+        deps.log(
+          `[bridge] allowedTools: dropped ${record.allowedTools.length - safeTools.length} unsafe rule(s) (session ${sessionId})`,
+        );
+      }
       const args = buildSpawnArgs({
         permissionMode: record.permissionMode,
         mcpPort: mcp.port,
@@ -1686,7 +1866,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         addDir: input.addDir,
         addDirs: input.addDirs,
         settingsPath: denySettings,
-        allowedTools: record.allowedTools, // remember 规则串由 M6 写入索引
+        allowedTools: safeTools, // remember 规则串由 M6 写入索引（R17 P9：已过安全判定）
       });
       deps.log(
         `[bridge] spawning turn: session=${sessionId} resume=${(forkReady ? forkParentCli : record.claudeSessionId) ?? "none"} fork=${forkReady} addDir=${(denyDirs ?? ["none"]).join(",")} denySettings=${denySettings ?? "none"} mcpConfig=${mcpConfigPath ?? "inline"} cwd=${workspace}`,
@@ -1722,8 +1902,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
 
       let sawResult = false;
       const command = base.command;
-      const startTurn = (spawnArgs: string[], workdir: string): TurnHandle =>
-        deps.spawnTurn({
+      const startTurn = (spawnArgs: string[], workdir: string): TurnHandle => {
+        const spawnAt = Date.now(); // R17 P3：进程 spawn 的同步点耗时（超阈值才记）
+        const handle = deps.spawnTurn({
           command,
           channel: base.channel, // win32 .cmd 壳的 cmd.exe 包装由 spawnTurn 内统一组装（§2.10 B）
           cmdExePath: base.cmdExe || undefined, // 空 = 未提供，走 resolveCmdExePath 兜底
@@ -1743,6 +1924,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           },
           logger: (m) => deps.log(m),
         });
+        logSlow("spawn", spawnAt);
+        return handle;
+      };
       let turn: TurnHandle | null = null;
       // 解锁时点 = 进程退出（收到 result 也要等进程退出，§4.6 并发契约）；
       // 同刻撤销端点 token（§4.8：token 只活在「该轮 spawn 参数 + 端点内存」里）+ 拍本轮快照
@@ -1870,6 +2054,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       rt.busy = null;
       rt.turn = null;
       sendTo(win, { type: "error", code, message: String(err), sessionId });
+      // R17 P8：早退也要推一次列表——极端情况下（buildTurnPrompt 抛出）归属那一推还没走到，
+      // 不推的话 UI 连「刚建的那条会话」都看不到（会话本身已建出，如实推、不留悬挂）。
+      await pushSessionList();
     }
   }
 
@@ -2044,7 +2231,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           sessionId: branch.id,
           claudeSessionId: null,
           projectDir: entry.projectDir,
-          sourcePath: snapshotPath(cfg.dataDir, parent.id, turn),
+          sourcePath: snapshotPath(cfg.dataDir, parent.id, turn, cfg.fs.join),
         },
         { fs: cfg.fs },
       );
@@ -2123,9 +2310,11 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
   ): Promise<void> {
     const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : "";
     // 未知 id / 无文件 → 空消息数组（§4.6 getHistory 行）；读失败在 store 内降级为 []
+    const readAt = Date.now(); // R17 P3：同步点耗时埋点（换绑定回执的那次整文件读）
     const messages = sessionId
       ? await deps.sessions.readHistory(sessionId)
       : [];
+    logSlow("readHistory", readAt);
     // R14 修点 1：回执带上「这个会话现在在跑什么」（无在途轮则不带该键，老形态逐字不变）
     const inFlight = sessionId ? inFlightOf(sessionId) : null;
     sendTo(win, {
@@ -2636,7 +2825,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           // 装完 claude / 探测超时恢复后，用户重开面板即可看到好结果）
           deps.reprobeCliIfFailed?.();
         }
-        sendTo(win, await sessionListMessage());
+        // R17 P1：握手不再直发 sessionListMessage()（那会绕过序号守卫 → 新实例可能先收旧快照），
+        // 改走唯一出口；本实例已注册（registry.set 早于本行），必在这次广播的收件人里
+        await pushSessionList();
         // R4-3：余额查询时机 = 面板打开（每个实例注册时一次；60s TTL 缓存兜住多实例重复打开）
         await pushBalance(win, false);
       })();
@@ -2649,12 +2840,20 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         // R10：会话区展开态（默认收起 = 一行高度还给消息区）
         sessionsExpanded: deps.sessionsExpanded?.get() === true,
       });
-      // 阅读上下文：重载后必须补推。sections.ts 的轮询去重键（lastReaderContextKey）活在**宿主**进程里，
+      // 阅读上下文：重载后必须补推。sections.ts 的轮询去重键（每实例一键）活在**宿主**进程里，
       // 页面重载不经过 stopReaderContextWatch，键不会失效 → 不补推的话重载后面板永远拿不到文献
-      // 上下文（顶栏空白 + 会话跟随失去依据，且不会自愈）。这里直连 buildReaderContext，绕过去重键。
-      void deps.buildReaderContext().then((ctx) => {
-        if (ctx) sendTo(win, ctx);
-      });
+      // 上下文（顶栏空白 + 会话跟随失去依据，且不会自愈）。这里直连取数，绕过去重键。
+      // R17 P4：按实例取（win）——每个实例拿它所在标签页的那一份；**必须补 .catch**：
+      // 取数抛错时这条链是 `void …then()`，会变成逃出 dispatch() 的未处理拒绝（既有缺陷，
+      // 随手一并修）。处置同 INTERFACE §3：记一条日志、该实例本轮跳过，不推 error。
+      void deps
+        .buildReaderContext(win)
+        .then((ctx) => {
+          if (ctx) sendTo(win, ctx);
+        })
+        .catch((err: unknown) => {
+          deps.log(`[bridge] readerContext (hello) failed: ${String(err)}`);
+        });
       return;
     }
 
@@ -2784,6 +2983,8 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     requestPermission,
     permissionSettled,
     unregister,
+    // R17 P4：拷贝（遍历期间注册表可变——sendTo 自带死实例摘除，会在遍历中改表）
+    instances: () => [...registry.keys()],
     getRuntime: (sessionId: string) => {
       const rt = runtimes.get(sessionId);
       return rt ? { sessionId, busy: rt.busy } : null;

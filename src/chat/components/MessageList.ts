@@ -95,7 +95,10 @@ export function MessageList(props: {
     "div",
     { class: "messages", ref: containerRef, onScroll },
     props.state.messages.length === 0
-      ? h(EmptyState, { connected: props.state.connected })
+      ? h(EmptyState, {
+          connected: props.state.connected,
+          hasSession: props.state.sessionId !== null,
+        })
       : null,
     // R13：由「逐 Turn 映射」改为「逐渲染项映射」——条带项与助手行项交错，index 仍恒等于
     // state.messages 下标（data-turn-index、MessageActions、NotePicker 全依赖这一对应关系）
@@ -143,12 +146,82 @@ export function MessageList(props: {
   );
 }
 
-function EmptyState(props: { connected: boolean }): VNode<any> {
+/**
+ * 空视图文案（R17 P1-d）：已连接但会话绑定为空（`sessionId===null`）时补一句说明——
+ * 此前是纯白，用户分不清「这篇文献还没有会话」与「坏了」。原句一字不改，只追加一行提示。
+ */
+function EmptyState(props: {
+  connected: boolean;
+  hasSession: boolean;
+}): VNode<any> {
   return h(
     "div",
     { class: "empty" },
     props.connected ? "已连接。输入问题开始对话。" : "等待宿主握手……",
+    props.connected && !props.hasSession
+      ? h(
+          "div",
+          { class: "empty-hint" },
+          "这篇文献还没有会话，直接输入问题即可新建。",
+        )
+      : null,
   );
+}
+
+/**
+ * R17 P3：paint 耗时直方图（**只观测，不改渲染管线、不改节流器**）。
+ * 读法：devtools / 外部探针读 `window.__claudianPaint`（与 `window.__claudianDiag` 同款只读约定）。
+ * p99 是**桶上界**（粗）：只用来定性「有没有 100ms 级帧」，不用于性能回归的精确判定。
+ * 模块级累加：页面寿命内有效（面板重载即清零，与 __claudianDiag 同口径）。
+ */
+const PAINT_SLOW_MS = 20;
+/** 桶上界（ms）——超过最后一档的算进「∞」档 */
+const PAINT_BUCKETS_MS = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+
+interface PaintStats {
+  count: number;
+  maxMs: number;
+  p99Ms: number;
+  slow: number;
+  buckets: number[];
+}
+
+/** 记一次 paint：更新直方图；单帧超阈值再记一条 recordDiag（行格式固定，INTERFACE-R17 §2） */
+function notePaint(ms: number, chars: number): void {
+  try {
+    const w = window as Window & { __claudianPaint?: PaintStats };
+    const stats = (w.__claudianPaint ??= {
+      count: 0,
+      maxMs: 0,
+      p99Ms: 0,
+      slow: 0,
+      buckets: new Array(PAINT_BUCKETS_MS.length + 1).fill(0),
+    });
+    stats.count += 1;
+    if (ms > stats.maxMs) {
+      stats.maxMs = ms;
+    }
+    let at = PAINT_BUCKETS_MS.findIndex((edge) => ms <= edge);
+    if (at < 0) {
+      at = PAINT_BUCKETS_MS.length; // ∞ 档
+    }
+    stats.buckets[at] += 1;
+    const target = Math.ceil(stats.count * 0.99);
+    let seen = 0;
+    for (let i = 0; i < stats.buckets.length; i++) {
+      seen += stats.buckets[i];
+      if (seen >= target) {
+        stats.p99Ms = i < PAINT_BUCKETS_MS.length ? PAINT_BUCKETS_MS[i] : ms;
+        break;
+      }
+    }
+    if (ms > PAINT_SLOW_MS) {
+      stats.slow += 1;
+      recordDiag(`ui.paint slow ${ms.toFixed(1)}ms len=${chars}`);
+    }
+  } catch {
+    // 探针失败不影响渲染（同 recordDiag 的口径）
+  }
 }
 
 interface TurnViewProps {
@@ -708,7 +781,14 @@ function MarkdownBlock(props: {
     if (!el) {
       return;
     }
+    // R17 P3：只量不改——RenderMarkdown + innerHTML 这一步的耗时（**解析 + DOM 构建，
+    // 不含布局/绘制**：`innerHTML=` 不强制 reflow，布局是随后合成时才发生；离屏实测里的
+    // 「replace+layout」那一半是量测脚本自己读 offsetHeight 逼出来的）。
+    // 结论用途：真机上若从没出现 >PAINT_SLOW_MS 的帧，只能排除「解析+构建」这一半，
+    // 布局/绘制与 GC 仍在嫌疑名单上；真出现 ~100ms 级帧才启用备选 B（tail 增量渲染）。
+    const t0 = performance.now();
     el.innerHTML = renderChatMarkdown(text, props.streaming);
+    notePaint(performance.now() - t0, text.length);
     lastPaintRef.current = Date.now();
   };
 

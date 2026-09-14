@@ -105,6 +105,7 @@ import {
   getSelectedCollectionID,
   lookupItemByKey,
   readerContextMessage,
+  readerInfoForTab,
   registerSelectionNoteButton,
   registerSelectionTracking,
   resolveMentionItem,
@@ -1168,7 +1169,14 @@ async function saveAttachmentFiles(
   }
   try {
     const out = await saveAttachments(
-      { cwd, sessionId: attach.sessionId, turn: attach.turn, files },
+      {
+        cwd,
+        sessionId: attach.sessionId,
+        turn: attach.turn,
+        files,
+        // R17 P6 同族：落点走原生拼接（不靠 cwd 猜分隔符——win32 上 `E:/x` 形态会拼出混用路径）
+        join: (...seg) => PathUtils.join(...seg),
+      },
       { fs: attachmentsFs },
     );
     return {
@@ -1219,6 +1227,8 @@ const instructionsFs: InstructionsFs = {
   writeText: async (path, text) => {
     await IOUtils.writeUTF8(path, text);
   },
+  // R17 P6：win32 上 IOUtils/nsIFile **不接受** "/"（NS_ERROR_FILE_UNRECOGNIZED_PATH，无容错）
+  join: (dir, name) => PathUtils.join(dir, name),
 };
 
 /**
@@ -1713,30 +1723,175 @@ async function buildReaderContext(): Promise<HostMessage | null> {
  */
 const READER_CONTEXT_POLL_MS = 2000;
 let readerContextTimer: ReturnType<typeof setInterval> | null = null;
-let lastReaderContextKey = "";
 /** 在途取数序号：轮询与 Notifier 两路都调 pushReaderContext，先发起的可能后完成 */
 const readerContextGuard = createSeqGuard();
 
-/** 取数 → 去重 → 广播（轮询与「切标签即时重推」共用；同一条上下文不发两遍，去重 key 就在这） */
+// ---- R17 P4：实例身份（实例窗口 → 它所在标签页的 reader）----
+
+/** 书库侧栏的固定 tabID（官方 itemPane.js:223）：拿到它 = 没有「自己的文献」→ 回落全局语义 */
+const ZOTERO_PANE_TAB_ID = "zotero-pane";
+/**
+ * win → tabID。**主捕获点在 load 监听器**（`mountChatBrowser` 的 onLoaded：拿到的正是桥注册表
+ * 用的那个 win，此刻**这份文档**已经装好），`onItemChange` 为辅补填；幂等 Map.set，先后无所谓。
+ * 为什么不能在 loadURI 之前取：那一刻 `browser.contentWindow` 还是上一份文档或 null。
+ * 为什么拿到就稳定：`item-details` 由 contextPane 按 tabID 创建、tab 关闭才移除（官方
+ * contextPane.js），书库侧恒 `zotero-pane` ⇒ 同一个 body 的 tabID 不会中途改变。
+ */
+const instanceTab = new Map<object, string>();
+/** win → 上次投递的 readerContext 去重键（**每实例一键**；修前是进程级单键） */
+const instanceCtxKey = new Map<object, string>();
+/** 已记过「身份解析不出」日志的实例（每实例一条，别随 2s tick 刷屏） */
+const scopeWarned = new Set<object>();
+/** 已记过「本 tick 因取不到条目被跳过」日志的实例（R17 P8②，进跳过态记一条） */
+const ctxSkipLogged = new Set<object>();
+
+/**
+ * 实例窗口 → 它所在标签页的 tabID（三层回落，顺序即优先级）：
+ *   ① `item-details.tabID`（reader 侧 contextPane 赋值；书库侧恒 "zotero-pane"）
+ *   ② `item-pane-custom-section.tabID`（itemDetails.js 的循环 + 基类 getter，**独立赋值点**）
+ *   ③ `item-details.dataset.tabId`（与 ① 同元素，冗余一层）
+ * 三层都没有 → null（调用方回落今天的全局语义，最坏不更坏）。
+ */
+export function tabIdOf(body: Element | null): string | null {
+  const details = body?.closest?.("item-details") as {
+    tabID?: unknown;
+    dataset?: DOMStringMap;
+  } | null;
+  if (typeof details?.tabID === "string" && details.tabID) {
+    return details.tabID;
+  }
+  const pane = body?.closest?.("item-pane-custom-section") as {
+    tabID?: unknown;
+  } | null;
+  if (typeof pane?.tabID === "string" && pane.tabID) {
+    return pane.tabID;
+  }
+  const ds = details?.dataset?.tabId;
+  return typeof ds === "string" && ds ? ds : null;
+}
+
+/** 记录实例身份（拿到 tabID 才写；一件实例「解析不出」只记一条 debug，可观测但不刷屏） */
+function noteInstanceScope(body: Element | null, win: object | null): void {
+  if (!win) {
+    return; // 页面还没 load 完（win=null/旧窗）→ 等下一次调用，不写脏身份
+  }
+  const tabID = tabIdOf(body);
+  if (tabID) {
+    instanceTab.set(win, tabID);
+    return;
+  }
+  if (!scopeWarned.has(win)) {
+    scopeWarned.add(win);
+    Zotero.debug(
+      "[claudian] readerContext: instance scope unknown → global fallback",
+    );
+  }
+}
+
+/** 实例注销时清掉它的全部身份/去重状态（防泄漏：窗口对象被 Map 强引用住） */
+function forgetInstance(win: object): void {
+  instanceTab.delete(win);
+  instanceCtxKey.delete(win);
+  scopeWarned.delete(win);
+  ctxSkipLogged.delete(win);
+}
+
+/** itemID → 条目信息（TTL 记忆化：只缓存 DB 往返那份，page/selection 仍每 tick 现读） */
+const ctxMemo = new Map<number, { item: ItemMetadata | null; at: number }>();
+const CTX_MEMO_TTL_MS = 60_000; // 与 contextSource 的条目缓存同口径
+const CTX_MEMO_MAX = 64; // ponytail: 同时在读的条目数是个位数，满了整体清空即可
+
+/** 条目信息（附件 → 父条目；独立 PDF 回落附件自身，口径同 buildReaderContext） */
+async function contextItemFor(itemID: number): Promise<ItemMetadata | null> {
+  const hit = ctxMemo.get(itemID);
+  if (hit && Date.now() - hit.at < CTX_MEMO_TTL_MS) {
+    return hit.item;
+  }
+  const deps = createZoteroContextDeps();
+  const attachment = await deps.getAttachment(itemID);
+  const parent =
+    attachment?.parentItemID == null
+      ? null
+      : await deps.getItemMetadata(attachment.parentItemID);
+  const item = resolveContextItem(
+    parent,
+    parent ? null : await deps.getItemMetadata(itemID),
+  );
+  if (ctxMemo.size >= CTX_MEMO_MAX) {
+    ctxMemo.clear();
+  }
+  ctxMemo.set(itemID, { item, at: Date.now() });
+  return item;
+}
+
+/**
+ * R17 P4：某个实例自己那份 readerContext（它所在标签页的 reader）。
+ * 身份解析不出（三层全空 / 书库侧栏 / 该 tabID 上没有 reader）→ 回落 `buildReaderContext()`
+ * = 今天的全局语义，失败面不扩大。取不到条目时整条 itemKey 为 null（调用方跳过该实例）。
+ */
+async function buildReaderContextFor(win: object): Promise<HostMessage | null> {
+  const tabID = instanceTab.get(win) ?? null;
+  if (!tabID || tabID === ZOTERO_PANE_TAB_ID) {
+    return buildReaderContext();
+  }
+  try {
+    if (!Zotero.Reader.getByTabID(tabID)) {
+      return buildReaderContext();
+    }
+  } catch (err) {
+    Zotero.logError(err as Error);
+    return buildReaderContext();
+  }
+  const reader = await readerInfoForTab(tabID);
+  let contextItem: ItemMetadata | null = null;
+  if (reader?.itemID != null) {
+    contextItem = await contextItemFor(reader.itemID);
+  }
+  return readerContextMessage(reader, contextItem);
+}
+
+/**
+ * 取数 → 去重 → **按实例定向投递**（轮询与「切标签即时重推」共用）。
+ * R17 P4：修前取一次全局选中标签、广播给所有实例——两个 PDF 标签各自的面板收到的是同一份
+ * （用户报的「切到别的文献，侧栏还是上一个文献的会话」）。现在逐实例取数与去重；
+ * 某实例取数抛错/取不到条目 → **该实例本 tick 跳过**，其余实例照常，不推 error。
+ */
 async function pushReaderContext(): Promise<void> {
   const isLatest = readerContextGuard.begin();
-  try {
-    const msg = await buildReaderContext();
+  for (const win of bridge?.instances() ?? []) {
+    let msg: HostMessage | null = null;
+    try {
+      msg = await buildReaderContextFor(win);
+    } catch (err) {
+      Zotero.logError(err as Error);
+      continue;
+    }
     // 复查修-3：期间又发起过（取数慢的那次回来晚了）→ 丢弃旧快照，不让旧文献覆盖新状态
     if (!isLatest()) {
       return;
     }
-    if (!msg || msg.type !== "readerContext" || msg.itemKey == null) {
-      return;
+    if (!msg || msg.type !== "readerContext") {
+      continue;
     }
+    if (msg.itemKey == null) {
+      // 取不到条目 → 该实例本 tick 跳过（口径不变，itemKey==null 整条不推）。
+      // R17 P8②：只加一条 debug 日志（含实例的 tabID），进跳过态记一条、恢复后清标记，
+      // 否则 2s tick 会把日志刷爆。真机观察步骤见 HANDOFF。
+      if (!ctxSkipLogged.has(win)) {
+        ctxSkipLogged.add(win);
+        Zotero.debug(
+          `[claudian] readerContext: skipped (instance scope ${instanceTab.get(win) ?? "unknown"}) — 本 tick 取不到条目`,
+        );
+      }
+      continue;
+    }
+    ctxSkipLogged.delete(win);
     const key = JSON.stringify(msg);
-    if (key === lastReaderContextKey) {
-      return;
+    if (key === instanceCtxKey.get(win)) {
+      continue;
     }
-    lastReaderContextKey = key;
-    bridge?.broadcast(msg);
-  } catch (err) {
-    Zotero.logError(err as Error);
+    instanceCtxKey.set(win, key);
+    bridge?.sendTo(win, msg);
   }
 }
 
@@ -1807,7 +1962,12 @@ function stopReaderContextWatch(): void {
     readerContextTimer = null;
   }
   stopReaderContextNotifier();
-  lastReaderContextKey = "";
+  // R17 P4：四张表一起清（插件停用/重载后重新推一遍，不拿旧键把新面板压住；也避免窗口对象
+  // 被这些 Map/Set 强引用住不放——instanceTab/scopeWarned 留强引用同样是泄漏）
+  instanceTab.clear();
+  instanceCtxKey.clear();
+  scopeWarned.clear();
+  ctxSkipLogged.clear();
 }
 
 // ---- 会话数据目录与存储（M5，§4.5）----
@@ -2369,7 +2529,7 @@ async function diagSnapshotsLine(
   if (!sessionId) {
     return "dir=(none) count=0 lastTurn=none";
   }
-  const dir = snapshotDir(dataDir, sessionId);
+  const dir = snapshotDir(dataDir, sessionId, rewindFs.join);
   const index = await readSnapshotIndex(
     { dataDir, sessionId },
     { fs: rewindFs },
@@ -2384,7 +2544,7 @@ async function diagSnapshotsLine(
 
 /** journal 行：残留回滚 journal 是否待处理（崩溃后未还原的信号） */
 async function diagJournalLine(dataDir: string): Promise<string> {
-  return `pending=${await rewindFs.exists(journalPath(dataDir))}`;
+  return `pending=${await rewindFs.exists(journalPath(dataDir, rewindFs.join))}`;
 }
 
 /** prefs 行：只出档位/开关/置顶数（Key 等凭据不进报告——有值也只写 set/unset，此处根本不传） */
@@ -2504,7 +2664,9 @@ function getHostBridge(): HostBridge {
     resolvePermission,
     getDefaultPermissionMode,
     spawnTurn: (options) => spawnTurn(getSubprocess(), options),
-    buildReaderContext,
+    // R17 P4：hello 补推按实例取（win → 它所在标签页的 reader）；无参调用 = 全局语义
+    buildReaderContext: (win?: object) =>
+      win ? buildReaderContextFor(win) : buildReaderContext(),
     sessions: getSessionStore(),
     inputHistory: getInputHistoryStore(),
     lookupItem: lookupItemByKey,
@@ -2616,6 +2778,17 @@ export function registerChatSection(): void {
     // 书库下点按钮就成了空动作。自动切面板仍只在 reader 侧触发（paneAutoShow 按 tabType 判）。
     onItemChange: ({ doc, body, item, tabType, setEnabled }) => {
       setEnabled(true);
+      // R17 P4：身份补填（辅）——load 监听器是主捕获点，这里只处理「load 早于身份可用」的顺序
+      // （幂等 Map.set，先后无所谓）；可能早于 load 完成（contentWindow 还是旧窗/null）→
+      // 由 noteInstanceScope 的 `!win 直接返回` 与「拿到 tabID 才写」两道守卫兜住
+      try {
+        const b = body.querySelector(
+          `#${config.addonRef}-chat-browser`,
+        ) as ChatBrowser | null;
+        noteInstanceScope(body as unknown as Element, b?.contentWindow ?? null);
+      } catch (err) {
+        Zotero.logError(err as Error);
+      }
       // 用户真机反馈（2026-09-11）：打开文献要直接看到 Claude 面板，别让人自己去点图标。
       // 整段兜住——体验增强项出问题不该影响 section 的启用逻辑
       try {
@@ -2640,6 +2813,7 @@ export function registerChatSection(): void {
       const win = browser?.contentWindow;
       if (win) {
         bridge?.unregister(win);
+        forgetInstance(win); // R17 P4：身份/去重 Map 一并清（同 unregisterUiInstance）
       }
     },
   });
@@ -2755,6 +2929,7 @@ export function mountChatBrowser(
  */
 export function unregisterUiInstance(win: object): void {
   bridge?.unregister(win);
+  forgetInstance(win); // R17 P4：身份/去重 Map 一并 delete（防窗口对象泄漏）
 }
 
 function loadChatPage(body: HTMLElement): void {
@@ -2762,7 +2937,10 @@ function loadChatPage(body: HTMLElement): void {
     `#${config.addonRef}-chat-browser`,
   ) as ChatBrowser | null;
   if (browser) {
-    mountChatBrowser(browser);
+    // R17 P4：身份捕获走 load 监听器（onLoaded）——它在 `loadURI` **之后**触发，此刻
+    // `browser.contentWindow` 就是桥注册表用的那个 win，且这份文档已经装好、能 closest 到
+    // `item-details`。在 loadURI 之前取会拿到上一份文档或 null（首挂实例直接回落成现状）。
+    mountChatBrowser(browser, (win) => noteInstanceScope(body, win));
   }
 }
 

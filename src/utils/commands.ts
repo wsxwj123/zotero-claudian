@@ -248,14 +248,28 @@ export interface CommandScanDeps {
   };
 }
 
-/** 相对段拼到 base 上（绝对段原样；`~/x` 剥掉 `~/`） */
-function joinBase(base: string, rel: string): string {
+/**
+ * 相对段拼到 base 上（绝对段原样；`~/x` 剥掉 `~/`）。
+ * R17 P6：相对段按 `/` 拆段后**逐段走注入的 join**（宿主 = PathUtils.join）——win32 上直接
+ * `${head}/${tail}` 会拼出 `E:\ws/.claude/commands`，Gecko 判 NS_ERROR_FILE_UNRECOGNIZED_PATH
+ * ⇒ 命令面板/技能清单恒空（修前是静默失效）。空 base 仍回 tail（既有语义，别吞）。
+ */
+function joinBase(
+  base: string,
+  rel: string,
+  join: (dir: string, name: string) => string,
+): string {
   const tail = rel.replace(/^~\//, "");
   if (rel.startsWith("/")) {
     return rel;
   }
   const head = String(base ?? "").replace(/[/\\]+$/, "");
-  return head ? `${head}/${tail}` : tail;
+  if (!head) {
+    return tail;
+  }
+  return tail
+    .split("/")
+    .reduce((acc, seg) => (seg ? join(acc, seg) : acc), head);
 }
 
 /** 扫描内部产物：面板条目 + 正文（正文只给 inline 转发分支用，绝不进 commandList） */
@@ -342,14 +356,14 @@ async function collectCommands(
   const out: ScannedCommand[] = [];
   const seen = new Set<string>();
   await scanDir(
-    joinBase(deps.root, COMMANDS_DIR_PROJECT),
+    joinBase(deps.root, COMMANDS_DIR_PROJECT, deps.fs.join),
     "project",
     deps,
     seen,
     out,
   );
   await scanDir(
-    joinBase(deps.home, COMMANDS_DIR_USER),
+    joinBase(deps.home, COMMANDS_DIR_USER, deps.fs.join),
     "user",
     deps,
     seen,
@@ -459,8 +473,18 @@ export async function scanSkills(
 ): Promise<CommandEntry[]> {
   const out: ScannedCommand[] = [];
   const seen = new Set<string>();
-  await scanSkillsDir(joinBase(deps.root, SKILLS_DIR_PROJECT), deps, seen, out);
-  await scanSkillsDir(joinBase(deps.home, SKILLS_DIR_USER), deps, seen, out);
+  await scanSkillsDir(
+    joinBase(deps.root, SKILLS_DIR_PROJECT, deps.fs.join),
+    deps,
+    seen,
+    out,
+  );
+  await scanSkillsDir(
+    joinBase(deps.home, SKILLS_DIR_USER, deps.fs.join),
+    deps,
+    seen,
+    out,
+  );
   return out.map(({ name, description, source }) => ({
     name,
     description,

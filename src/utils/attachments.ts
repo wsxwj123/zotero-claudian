@@ -210,7 +210,12 @@ export function attachmentRejectReason(
   return null;
 }
 
-/** 路径分隔符跟着 cwd 走（Windows cwd 用 `\`）；纯函数，与 PathUtils 同口径 */
+/**
+ * 路径分隔符跟着 cwd 走（Windows cwd 用 `\`）；纯函数，与 PathUtils 同口径。
+ * R17 P6 同族收尾：这只是**猜**（win32 用户把工作区写成 `E:/Zotero/ws` 就会拼出
+ * `E:/Zotero/ws/attachments\…` 这种混用路径，Gecko 直接判 NS_ERROR_FILE_UNRECOGNIZED_PATH）
+ * ——新调用方请传下面那个注入的 `join`（真宿主 = PathUtils.join）；缺省分支只为老调用方保留。
+ */
 function separatorOf(cwd: string): string {
   return cwd.includes("\\") && !cwd.includes("/") ? "\\" : "/";
 }
@@ -223,6 +228,11 @@ export function attachmentDirPath(input: {
   cwd: string;
   sessionId: string;
   turn: number;
+  /**
+   * R17 P6 同族收尾：可选注入的路径拼接（真宿主传 PathUtils.join）。
+   * 缺省 = 今天的按 cwd 猜分隔符（老调用方与既有单测逐字不变）。
+   */
+  join?: (...segs: string[]) => string;
 }): string {
   const cwd = typeof input?.cwd === "string" ? input.cwd : "";
   if (!cwd) {
@@ -244,9 +254,9 @@ export function attachmentDirPath(input: {
   if (!Number.isInteger(turn) || (turn as number) < 0) {
     throw new Error(`attachmentDirPath: 非法轮序号 ${String(turn)}`);
   }
-  const sep = separatorOf(cwd);
   const root = cwd.replace(/[\\/]+$/, "");
-  return [root, ATTACHMENT_DIR_NAME, sessionId, String(turn)].join(sep);
+  const segs = [root, ATTACHMENT_DIR_NAME, sessionId, String(turn)];
+  return input.join ? input.join(...segs) : segs.join(separatorOf(cwd));
 }
 
 /**
@@ -260,6 +270,8 @@ export async function saveAttachments(
     sessionId: string;
     turn: number;
     files?: readonly AttachmentInput[] | null;
+    /** R17 P6 同族收尾：落点拼接的注入面（透传给 attachmentDirPath；缺省 = 猜分隔符） */
+    join?: (...segs: string[]) => string;
   },
   deps: { fs: AttachmentsFs },
 ): Promise<SaveAttachmentsResult> {

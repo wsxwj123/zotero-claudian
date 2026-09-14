@@ -463,55 +463,60 @@ export function readerContextMessage(
   };
 }
 
+/**
+ * R17 P4：指定标签页的阅读器读法（`getSelectedReader` 的泛化）——按实例定向投递 readerContext 时，
+ * 每个实例要的是**它所在标签页**的 reader，而不是全局选中标签的那一份。
+ * tabID 空/该标签没有 reader → null（调用方回落全局语义，失败面不扩大）；异常一律收敛成 null。
+ */
+export async function readerInfoForTab(
+  tabID: string | null,
+): Promise<ReaderInfo | null> {
+  try {
+    if (!tabID) {
+      return null;
+    }
+    const reader = Zotero.Reader.getByTabID(tabID);
+    if (!reader) {
+      return null;
+    }
+    const rawItemID =
+      typeof reader.itemID === "number"
+        ? reader.itemID
+        : (reader as unknown as { _item?: unknown })._item;
+    const nestedID = (rawItemID as { id?: unknown } | null | undefined)?.id;
+    const itemID: number | null =
+      typeof reader.itemID === "number"
+        ? reader.itemID
+        : typeof nestedID === "number"
+          ? nestedID
+          : null;
+    const pageIndex = readerPageIndex(reader, itemID);
+    let selection: SelectionInfo | null = null;
+    if (itemID != null && lastSelection && lastSelection.itemID === itemID) {
+      selection = {
+        text: lastSelection.text,
+        page: lastSelection.pageIndex + 1,
+        parentKey: contextItemKeyOf(itemID),
+      };
+    } else {
+      selection = peekLiveSelection(reader, itemID);
+    }
+    return {
+      itemID: itemID == null ? null : itemID,
+      pageIndex,
+      pageLabel: peekPageLabel(reader, pageIndex),
+      selection,
+    };
+  } catch (err) {
+    Zotero.logError(err as Error);
+    return null;
+  }
+}
+
 export function createZoteroContextDeps(): ContextDeps {
   return {
-    async getSelectedReader(): Promise<ReaderInfo | null> {
-      try {
-        const tabID = getSelectedTabID();
-        if (!tabID) {
-          return null;
-        }
-        const reader = Zotero.Reader.getByTabID(tabID);
-        if (!reader) {
-          return null;
-        }
-        const rawItemID =
-          typeof reader.itemID === "number"
-            ? reader.itemID
-            : (reader as unknown as { _item?: unknown })._item;
-        const nestedID = (rawItemID as { id?: unknown } | null | undefined)?.id;
-        const itemID: number | null =
-          typeof reader.itemID === "number"
-            ? reader.itemID
-            : typeof nestedID === "number"
-              ? nestedID
-              : null;
-        const pageIndex = readerPageIndex(reader, itemID);
-        let selection: SelectionInfo | null = null;
-        if (
-          itemID != null &&
-          lastSelection &&
-          lastSelection.itemID === itemID
-        ) {
-          selection = {
-            text: lastSelection.text,
-            page: lastSelection.pageIndex + 1,
-            parentKey: contextItemKeyOf(itemID),
-          };
-        } else {
-          selection = peekLiveSelection(reader, itemID);
-        }
-        return {
-          itemID: itemID == null ? null : itemID,
-          pageIndex,
-          pageLabel: peekPageLabel(reader, pageIndex),
-          selection,
-        };
-      } catch (err) {
-        Zotero.logError(err as Error);
-        return null;
-      }
-    },
+    /** 全局选中标签那一份（发送轮与身份解析不出时的回落口径，行为逐字不变） */
+    getSelectedReader: () => readerInfoForTab(getSelectedTabID()),
 
     async getAttachment(itemID: number): Promise<AttachmentInfo | null> {
       try {
