@@ -966,8 +966,7 @@ function normalizeNoteList(raw: unknown): NoteSummary[] {
 function reduceHistory(
   state: ChatState,
   messages:
-    | { role: "user" | "assistant"; text: string; ts: number }[]
-    | unknown,
+    { role: "user" | "assistant"; text: string; ts: number }[] | unknown,
 ): ChatState {
   if (!Array.isArray(messages)) {
     return state;
@@ -1480,8 +1479,7 @@ function safeStringify(value: unknown): string {
 export function assistantTurnContent(
   turn: Turn,
 ):
-  | { kind: "blocks"; blocks: TurnBlock[] }
-  | { kind: "markdown"; text: string } {
+  { kind: "blocks"; blocks: TurnBlock[] } | { kind: "markdown"; text: string } {
   if (turn.blocks && turn.blocks.length > 0) {
     return { kind: "blocks", blocks: turn.blocks };
   }

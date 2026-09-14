@@ -79,11 +79,11 @@ protocol.ts：字节流按 `\n` 分帧 → 逐行 `JSON.parse`（失败行进 de
 
 ### 4.4 设置项清单
 
-| 键                                                 | 类型       | 默认                                                                                                                                                                                                               | 生效时机                                           |
+| 键 | 类型 | 默认 | 生效时机 |
 | -------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- | --------------- | ---------------- |
-| `extensions.zotero-claudian.workspacePath`         | string     | darwin：`~/zotero-claudian-workspace`（`~` 展开；2026-09-11 修订避 TCC 授权面）；win32：`%USERPROFILE%\Documents\zotero-claudian-workspace`（经系统 API 取 Documents 实际落点，兼容 OneDrive 重定向，DESIGN.md D） | 下一次 spawn 即生效，进行中会话不中断              |
-| `extensions.zotero-claudian.defaultPermissionMode` | `"default" | "acceptEdits"                                                                                                                                                                                                      | "plan"`                                            | `"acceptEdits"` | 新建会话的初始档 |
-| `extensions.zotero-claudian.cliPathOverride`       | string     | `""`                                                                                                                                                                                                               | 空=自动解析；非空校验失败 → 回落自动解析并 UI 告警 |
+| `extensions.zotero-claudian.workspacePath` | string | darwin：`~/zotero-claudian-workspace`（`~` 展开；2026-09-11 修订避 TCC 授权面）；win32：`%USERPROFILE%\Documents\zotero-claudian-workspace`（经系统 API 取 Documents 实际落点，兼容 OneDrive 重定向，DESIGN.md D） | 下一次 spawn 即生效，进行中会话不中断 |
+| `extensions.zotero-claudian.defaultPermissionMode` | `"default" | "acceptEdits"                                                                                                                                                                                                      | "plan"` | `"acceptEdits"` | 新建会话的初始档 |
+| `extensions.zotero-claudian.cliPathOverride` | string | `""` | 空=自动解析；非空校验失败 → 回落自动解析并 UI 告警 |
 
 存储走 Zotero.Prefs；设置页经 `Zotero.PreferencePanes.register`（见 DESIGN.md，源自 Z 1）。
 

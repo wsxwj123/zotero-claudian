@@ -28,6 +28,10 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Lint (prettier + eslint)
+        # .gitattributes 已强制 eol=lf，Windows runner 上 prettier --check 不会因 CRLF 误报
+        run: npm run lint:check
+
       - name: Acceptance tests (locked contract tests)
         # 引号形式让 tsx/node 自行解析 glob（Windows runner 的 pwsh 不展开 glob）
         run: npx tsx --test "tests/acceptance/*.test.mjs"
@@ -37,6 +41,10 @@ jobs:
 
       - name: Unit tests (mjs)
         run: npx tsx --test "tests/unit/*.test.mjs"
+
+      - name: Review-asset tests (tests/unit/m5-retest … m8-verify)
+        # 六个复核目录此前不在任何门禁里，曾无声变红三天（LEARNINGS 2026-09-14）；glob 由 node 自行展开
+        run: npx tsx --test "tests/unit/m*/*.ts"
 
       - name: Build XPI
         run: npm run build

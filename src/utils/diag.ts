@@ -51,12 +51,7 @@ export type DiagKey = (typeof DIAG_KEYS)[number];
 
 /** 单行取值：字符串/数字/布尔 = 正常；null/undefined = 没采集到；`{error}` = 采集失败（原因写明） */
 export type DiagValue =
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | { error: unknown };
+  string | number | boolean | null | undefined | { error: unknown };
 
 /**
  * 采集结果（宿主传入）。已知键见 DIAG_KEYS；**额外键允许存在但不进报告**——

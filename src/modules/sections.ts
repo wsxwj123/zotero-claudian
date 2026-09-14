@@ -1188,7 +1188,9 @@ async function prepareDenySettings(
     return path;
   } catch (err) {
     Zotero.logError(err as Error);
-    throw new Error(`deny settings write failed: ${String(err)}`);
+    throw new Error(`deny settings write failed: ${String(err)}`, {
+      cause: err,
+    });
   }
 }
 
@@ -1429,8 +1431,7 @@ function startReaderContextNotifier(): void {
             return;
           }
           const data = extraData as
-            | Record<string, { type?: unknown } | undefined>
-            | undefined;
+            Record<string, { type?: unknown } | undefined> | undefined;
           const isReader = ids.some((id) => {
             const t = data?.[String(id)]?.type;
             return typeof t !== "string" || t.startsWith("reader");

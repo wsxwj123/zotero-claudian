@@ -4,7 +4,8 @@
  * 只有模块级副作用需要按环境区分（生产静音日志、开发打开元素日志）；
  * 每次调用都新建一个实例，调用方用完自行丢弃，不做全局单例缓存。
  */
-import { ZoteroToolkit } from "zotero-plugin-toolkit";
+// toolkit 5.2.0 起聚合类只从 /ztoolkit 子路径导出（主入口只剩各 Tool/Helper）
+import { ZoteroToolkit } from "zotero-plugin-toolkit/ztoolkit";
 import { config } from "../../package.json";
 
 export { createZToolkit };

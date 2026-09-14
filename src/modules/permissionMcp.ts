@@ -773,7 +773,9 @@ export function startPermissionServer(opts: {
     bound = createServerSocket();
     bound.init(0, true, -1);
   } catch (err) {
-    throw new Error(`permission endpoint bind failed: ${String(err)}`);
+    throw new Error(`permission endpoint bind failed: ${String(err)}`, {
+      cause: err,
+    });
   }
   const port = bound.port;
   bound.asyncListen({

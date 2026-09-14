@@ -9,13 +9,7 @@ import { h } from "preact";
 import type { VNode } from "preact";
 
 export type IconName =
-  | "copy"
-  | "check"
-  | "edit"
-  | "branch"
-  | "note"
-  | "plus"
-  | "paperclip";
+  "copy" | "check" | "edit" | "branch" | "note" | "plus" | "paperclip";
 
 /** 每个图标 = 一组 path 的 d（24×24 坐标系；只描边不填充） */
 const PATHS: Record<IconName, string[]> = {

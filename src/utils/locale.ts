@@ -76,8 +76,7 @@ function getString(
   const fullId = getLocaleID(id);
   const attribute = typeof arg === "string" ? arg : undefined;
   const args = (typeof arg === "object" ? arg.args : undefined) as
-    | L10nArgs
-    | undefined;
+    L10nArgs | undefined;
 
   // 未知消息 id 返回 [null]；命中时 attributes 与 value 一并返回
   const entry = bundle?.formatMessagesSync([{ id: fullId, args }])[0];

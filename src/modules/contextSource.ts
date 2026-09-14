@@ -231,8 +231,7 @@ export function registerSelectionNoteButton(): void {
 function getSelectedTabID(): string | null {
   try {
     const win = Zotero.getMainWindow() as
-      | (Window & { Zotero_Tabs?: { selectedID: string } })
-      | null;
+      (Window & { Zotero_Tabs?: { selectedID: string } }) | null;
     return win?.Zotero_Tabs?.selectedID ?? null;
   } catch {
     return null;
@@ -354,7 +353,8 @@ function readerPageIndex(
     return null;
   }
   try {
-    const item = Zotero.Items.get(itemID);
+    // zotero-types 4.1.3 起 get() 的查无返回类型是 false：归一成 null，下面的 ?. 才成立
+    const item = Zotero.Items.get(itemID) || null;
     const last = item?.getAttachmentLastPageIndex?.();
     return typeof last === "number" ? last : null;
   } catch {
@@ -652,7 +652,8 @@ export async function getItemCollectionIDs(itemKey: string): Promise<number[]> {
 /** 合集名（查无/空名 → null，调用方回落 `collection-<id>` 目录名） */
 export function getCollectionName(collectionID: number): string | null {
   try {
-    const name = Zotero.Collections.get(collectionID)?.name;
+    const collection = Zotero.Collections.get(collectionID) || null;
+    const name = collection?.name;
     return typeof name === "string" && name.trim() ? name : null;
   } catch (err) {
     Zotero.logError(err as Error);
@@ -713,7 +714,8 @@ function collectionNamesOf(item: Zotero.Item): string[] {
       if (typeof id !== "number") {
         continue;
       }
-      const name = Zotero.Collections.get(id)?.name;
+      const collection = Zotero.Collections.get(id) || null;
+      const name = collection?.name;
       if (typeof name === "string" && name) {
         names.push(name);
       }

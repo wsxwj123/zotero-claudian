@@ -207,8 +207,7 @@ test("permission: 端点故障（起监听失败）→ SPAWN_FAILED 且不 spawn
   bridge.dispatch({ source: win, data: { type: "send", text: "你好" } });
   await tick();
   const err = deps.sent.filter((s) => s.msg.type === "error").pop()?.msg as
-    | { code: string; message: string }
-    | undefined;
+    { code: string; message: string } | undefined;
   assert.ok(err);
   assert.equal(err.code, "SPAWN_FAILED");
   assert.ok(err.message.includes("address in use"));
@@ -773,8 +772,7 @@ test("permission: spawn 前失败（deny settings 写失败）→ 已写出的 m
 
   assert.equal(deps.turns.length, 0);
   const err = deps.sent.filter((s) => s.msg.type === "error").pop()?.msg as
-    | { code: string }
-    | undefined;
+    { code: string } | undefined;
   assert.equal(err?.code, "SPAWN_FAILED");
   assert.deepEqual(cleaned, ["/data/claudian/mcp-config-2.json"]);
 });
