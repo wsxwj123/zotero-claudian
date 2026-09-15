@@ -22,7 +22,7 @@ export interface ScopeChip {
 /** 0 篇回执的就地提示（R12-C：不落废 chip，给「先怎么选」+ 重试路径） */
 export const SCOPE_EMPTY_HINT: Record<ScopeKind, string> = {
   selection:
-    "没读到选中的文献——请先在左侧文献列表里选中文献（按住 ⌘ 多选），再点「重试」",
+    "没读到选中的文献——请先在左侧文献列表里选中文献（⌘/Ctrl 多选），再点「重试」",
   collection:
     "当前分类里没读到文献——请先在左侧选中一个含文献的分类，再点「重试」",
 };

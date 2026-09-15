@@ -855,24 +855,29 @@ async function listCollectionMembers(
 }
 
 /**
- * 书库里当前选中的条目（ZoteroPane.getSelectedItems；取不到 → []）。
- * R12：用 libraryTabOnly —— 光标的场景多半在 PDF 阅读器标签页，而
- * `getSelectedItems()` 在 reader 标签下返回的是「当前 PDF 的父条目」，不是书库里的多选；
- * 选项写的是「书库中选中的文献」，就读书库树的选择（阅读器标签下也读得到）。
+ * 书库里当前选中的条目（取不到 → []）。
+ * R18：直接读书库条目树 `ZoteroPane.itemsView.getSelectedItems()`，不管当前在哪个标签页。
+ * 不能靠 `getSelectedItems(false, { libraryTabOnly: true })`：第二参数 Zotero 10.0 起才认，
+ * 7.0.12–9.0.6 会丢掉它——阅读器标签下只回「当前 PDF 的父条目」（固定 1 篇）、「全页」标签下回 0 篇，
+ * 且结果看着完全正常、事后判断不出来。条目树缺失（没建好 / 将来改名）时才回落官方参数。
  */
 async function listSelectedItems(): Promise<ScopeCandidate[]> {
   try {
     const win = Zotero.getMainWindow() as unknown as {
       ZoteroPane?: {
+        itemsView?: { getSelectedItems?: (asIDs?: false) => unknown[] } | null;
         getSelectedItems?: (
           asIDs?: false,
           opts?: { libraryTabOnly?: boolean },
         ) => unknown[];
       };
     } | null;
+    const pane = win?.ZoteroPane;
+    const tree = pane?.itemsView;
     const items =
-      win?.ZoteroPane?.getSelectedItems?.(false, { libraryTabOnly: true }) ??
-      [];
+      typeof tree?.getSelectedItems === "function"
+        ? tree.getSelectedItems(false)
+        : pane?.getSelectedItems?.(false, { libraryTabOnly: true });
     const out: ScopeCandidate[] = [];
     for (const raw of Array.isArray(items) ? items : []) {
       const item = raw as Zotero.Item;

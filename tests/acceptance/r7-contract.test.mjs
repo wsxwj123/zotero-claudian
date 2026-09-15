@@ -39,6 +39,7 @@ import {
   MENTION_QUERY_MAX,
   MENTION_RESULTS_MAX,
   SCOPE_ABSTRACT_MAX,
+  SCOPE_ABSTRACT_MAX_NO_PDF,
   SCOPE_ITEMS_MAX,
   buildAttachmentDenySettings,
   buildReferencedItemsBlock,
@@ -399,30 +400,26 @@ test('R7 §3.6：条目上限 40 —— 41 条截断（truncated:true）、正�
   assert.equal(exact.truncated, false);
 });
 
-test('R7 §3.6：注入区块标记逐字为 [Scope: <label>]，摘要截 300、无附件 PDF: (none)', () => {
+test('R7 §3.6（R18 改）：注入区块标记逐字为 [Scope: <label>]，无本机 PDF 的摘要上限 1500、超出以「…（摘要已截断）」收尾、无附件 PDF: (none)', () => {
   assert.equal(SCOPE_ABSTRACT_MAX, 300);
+  assert.equal(SCOPE_ABSTRACT_MAX_NO_PDF, 1500);
   const block = buildScopeBlock({
     kind: 'collection',
     label: '科学前言',
     items: [
-      {
-        itemKey: 'K0',
-        title: '第一篇',
-        creators: ['A'],
-        year: '2020',
-        doi: null,
-        abstract: 'A'.repeat(300) + 'ZZZ',
-        pdfPath: null,
-        pdfDir: null,
-        attachmentKey: null,
-      },
+      { itemKey: 'K0', title: '第一篇', creators: ['A'], year: '2020', doi: null,
+        abstract: 'A'.repeat(300) + 'ZZZ', pdfPath: null, pdfDir: null, attachmentKey: null },
+      { itemKey: 'K1', title: '第二篇', creators: ['B'], year: '2021', doi: null,
+        abstract: 'B'.repeat(1500) + 'YYY', pdfPath: null, pdfDir: null, attachmentKey: null },
     ],
     truncated: true,
   });
   const lines = block.split('\n').filter((l) => l.trim() !== '');
   assert.equal(lines[0], '[Scope: 科学前言]');
   assert.ok(block.includes('PDF: (none)'));
-  assert.ok(!block.includes('ZZZ'), '摘要必须截到 300 字符以内');
+  assert.ok(block.includes('A'.repeat(300) + 'ZZZ'), '无本机 PDF：303 字在 1500 以内，原样保留');
+  assert.ok(block.includes('B'.repeat(1500) + '…（摘要已截断）'), '无本机 PDF：超过 1500 截断并以收尾标记结束');
+  assert.ok(!block.includes('YYY'), '第 1501 字起不得出现');
   assert.ok(block.includes('已截断至 40 篇'), '截断须在区块里标注');
   assert.ok(!/null|undefined/.test(block), '空值不得写成 null/undefined');
 });

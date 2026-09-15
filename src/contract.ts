@@ -145,6 +145,7 @@ export type {
 export {
   SCOPE_ITEMS_MAX,
   SCOPE_ABSTRACT_MAX,
+  SCOPE_ABSTRACT_MAX_NO_PDF,
   resolveScope,
   buildScopeBlock,
   mergeScopeAddDirs,
