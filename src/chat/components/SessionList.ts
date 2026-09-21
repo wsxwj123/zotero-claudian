@@ -131,6 +131,20 @@ export function SessionList(props: {
             expanded.includes(row.id) ? "▾" : "▸",
           )
         : null,
+      // R20：待审批小圆点——卡按会话过滤后，这是非绑定视图看见「别处有操作等确认」的入口
+      //（点这一行就切过去，切过去由宿主补推那张卡）。只认严格布尔 true，老宿主不带该键 ⇒ 不亮
+      row.pendingPermission === true
+        ? h(
+            "span",
+            {
+              class: "session-pending",
+              "data-testid": "session-pending",
+              title: "有操作等你确认",
+              "aria-label": "待审批",
+            },
+            "●",
+          )
+        : null,
       h(
         "button",
         {

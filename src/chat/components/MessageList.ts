@@ -13,7 +13,11 @@ import {
 import { enhanceMermaidBlocks } from "../lib/mermaidRender";
 import { recordDiag } from "../lib/bridgeClient";
 import { nextRenderDelay, shouldRender } from "../lib/renderThrottle";
-import { assistantTurnContent, notePickerView } from "../lib/chatModel";
+import {
+  assistantTurnContent,
+  notePickerView,
+  pendingPermissionElsewhere,
+} from "../lib/chatModel";
 import {
   canEditTurn,
   isOverflowing,
@@ -98,6 +102,8 @@ export function MessageList(props: {
       ? h(EmptyState, {
           connected: props.state.connected,
           hasSession: props.state.sessionId !== null,
+          // R20：别的文献的会话有在途权限卡（判定在 model 层，组件不现算——见修订 r3）
+          hasForeignPending: pendingPermissionElsewhere(props.state),
         })
       : null,
     // R13：由「逐 Turn 映射」改为「逐渲染项映射」——条带项与助手行项交错，index 仍恒等于
@@ -153,6 +159,8 @@ export function MessageList(props: {
 function EmptyState(props: {
   connected: boolean;
   hasSession: boolean;
+  /** R20：别处（没绑在本面板上的会话）有在途权限卡 —— pendingPermissionElsewhere 的返回值 */
+  hasForeignPending: boolean;
 }): VNode<any> {
   return h(
     "div",
@@ -163,6 +171,15 @@ function EmptyState(props: {
           "div",
           { class: "empty-hint" },
           "这篇文献还没有会话，直接输入问题即可新建。",
+        )
+      : null,
+    // R20：卡改为按会话过滤后，空面板上看不见别处的卡 ⇒ 120s 静默 deny。补一句指路
+    //（纯文字、不可点：非绑定视图上永远没有「允许/拒绝」入口；带标记的是哪条由会话列表承担）
+    props.hasForeignPending
+      ? h(
+          "div",
+          { class: "empty-hint" },
+          "其它文献的会话有操作等你确认，去会话列表里点开带标记的那条。",
         )
       : null,
   );

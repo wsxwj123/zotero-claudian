@@ -167,6 +167,12 @@ export interface SessionSummary {
   snapshotTurns?: number[];
   /** R4-3：该会话累计用量（索引落盘值）；从未跑过带用量的轮 → 字段不出现（UI 不显示该段） */
   usage?: UsageStats;
+  /**
+   * R20：该会话当前是否有在途权限卡（未作答、未超时、该轮进程未退）。宿主按自己的在途卡台账填，
+   * UI 不推断。`true` → 会话列表行上亮「待审批」标记；缺键/非布尔（老宿主、脏数据）一律当 false。
+   * **只影响展示**：它为 true 也不会让卡出现在没绑该会话的视图里。
+   */
+  pendingPermission?: boolean;
 }
 
 /** 宿主 → UI（INTERFACE §4.6 宿主→UI 表） */
@@ -233,7 +239,13 @@ export type HostMessage =
    */
   | { type: "inputHistory"; sessionId: string; entries: string[] }
   | {
+      /**
+       * R20：`sessionId` = 这张卡属于哪个会话（来自宿主的「端点 token ↔ 会话」映射，
+       * 不采信 CLI 回包）。UI 按它认领：只有绑到该会话的视图出卡。
+       * 老宿主不带该键 → 按全局消息在所有视图显示（兼容，行为逐字同今天）。
+       */
       type: "permissionRequest";
+      sessionId?: string;
       requestId: string;
       tool: string;
       inputSummary: string;

@@ -670,6 +670,12 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
   const pending = new Map<UiWindowKey, InstanceEntry>();
   /** 会话运行时（按会话 id；索引记录在 deps.sessions，这里只放进程/本轮文本等易失状态） */
   const runtimes = new Map<string, SessionRuntime>();
+  /**
+   * R20：在途权限卡台账（requestId → 载荷，插入序即推送序）。卡改为按会话过滤后，
+   * 切走的视图收不到卡 ⇒ 切回时要补推（handleGetHistory），会话列表也要标「待审批」
+   *（sessionListMessage）。三路结算都经 permissionSettled 摘除，端点侧 closeTurn 也走那条。
+   */
+  const pendingCards = new Map<string, PermissionRequestPayload>();
 
   const helloTimeoutMs = deps.helloTimeoutMs ?? 30_000;
   /** R17 P1：sessionList 推送序号（pushSessionList 是唯一出口，见该函数注释） */
@@ -850,6 +856,11 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
   async function sessionListMessage(): Promise<HostMessage> {
     const startedAt = Date.now(); // R17 P3：同步点耗时埋点（超阈值才记）
     const sessions: SessionSummary[] = [];
+    // R20：有在途卡的会话（布尔位不是计数——同会话多张卡只要还剩一张就保持 true）
+    const awaitingPermission = new Set<string>();
+    for (const card of pendingCards.values()) {
+      awaitingPermission.add(card.sessionId);
+    }
     /** R7-K：同一 itemKey 只查一次（列表每次推送都查一轮，条目多了很亏） */
     const itemCache = new Map<
       string,
@@ -904,6 +915,11 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         // R4-3：会话累计用量随列表走——UI 换会话/重启后即可显示（不必等下一轮 usageStats）。
         // 无数据（从未跑过带用量的轮）→ 不带该键
         ...(rec.usage ? { usage: rec.usage } : {}),
+        // R20：待审批位（INTERFACE-R20 §2.4）。只在**接线了权限面**时带该键
+        //（未接线/老宿主形态逐字不变，与上面 snapshotTurns 同写法）：没有端点就不可能有在途卡。
+        ...(deps.resolvePermission
+          ? { pendingPermission: awaitingPermission.has(rec.id) }
+          : {}),
       });
     }
     logSlow("sessionList", startedAt);
@@ -1105,26 +1121,49 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
   }
 
   /**
+   * R20：卡消息的唯一构造点（首推广播与切回补推共用一份形状，§4.6 五字段不多不少）。
+   * sessionId 取自宿主自己的「端点 token ↔ 会话」映射（req.sessionId），绝不采信 CLI 回包内容。
+   */
+  function permissionCardMessage(req: PermissionRequestPayload): HostMessage {
+    return {
+      type: "permissionRequest",
+      sessionId: req.sessionId,
+      requestId: req.requestId,
+      tool: req.tool,
+      inputSummary: req.inputSummary,
+      rawInput: req.rawInput,
+    };
+  }
+
+  /**
+   * R20：从在途卡台账摘掉（三路结算共用）。摘到了才刷新会话列表——台账里没有这张卡
+   * （过期/重复作答）时不该白推一次列表。
+   */
+  function settlePendingCard(requestId: string): void {
+    if (pendingCards.delete(requestId)) {
+      void pushSessionList();
+    }
+  }
+
+  /**
    * 权限卡请求广播（§4.6 宿主→UI 表 permissionRequest）。
-   * 字段与契约逐字一致：{requestId, tool, inputSummary, rawInput}——不加 sessionId，
-   * 与 streamEvent/error 的会话过滤不同，卡是全局的（多实例同收，先答者生效）。
+   * R20：载荷带上 sessionId，UI 按会话认领——只有绑到该会话的面板出卡
+   *（老宿主不带此键时 UI 仍按全局消息全部显示）。同时记进在途卡台账，供切回补推与列表标记。
    */
   function requestPermission(req: PermissionRequestPayload): void {
     deps.log(
       `[bridge] permissionRequest: ${req.tool} (${req.requestId}) → ${registry.size} instance(s)`,
     );
-    broadcast({
-      type: "permissionRequest",
-      requestId: req.requestId,
-      tool: req.tool,
-      inputSummary: req.inputSummary,
-      rawInput: req.rawInput,
-    });
+    pendingCards.set(req.requestId, req);
+    broadcast(permissionCardMessage(req));
+    // R20：列表上的「待审批」标记是非绑定视图唯一的入口，卡一推出就得亮
+    void pushSessionList();
   }
 
   /**
-   * 权限卡结算广播（§4.6 permissionResolved）：与 permissionRequest 同为全局消息
-   * （卡是广播给多实例的，摘卡也必须全实例一致）。空 id → 忽略 + log（防御非法调用）。
+   * 权限卡结算广播（§4.6 permissionResolved）：**保持全局消息、字段不加**
+   * （卡是广播给多实例的，摘卡也必须全实例一致；多摘只是让用户重走审批，漏摘留永久残影）。
+   * 空 id → 忽略 + log（防御非法调用）。R20：顺带摘台账 + 刷新列表（标记回落）。
    */
   function permissionSettled(requestId: string): void {
     if (!requestId) {
@@ -1135,6 +1174,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       `[bridge] permissionSettled: ${requestId} → ${registry.size} instance(s)`,
     );
     broadcast({ type: "permissionResolved", requestId });
+    settlePendingCard(requestId);
   }
 
   /**
@@ -1148,6 +1188,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       deps.log("[bridge] permissionResponse: missing requestId → ignored");
       return;
     }
+    // R20：作答即摘在途卡台账（与端点回写是否命中无关——过期/他实例已答的 id
+    // 也不该继续挂着「待审批」标记）。摘卡通知仍由端点侧结算后走 permissionSettled 广播。
+    settlePendingCard(requestId);
     const allow = msg.allow === true;
     const remember = msg.remember === true;
     const resolved = deps.resolvePermission?.(requestId, allow) ?? null;
@@ -2323,6 +2366,20 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
       messages,
       ...(inFlight ? { inFlight } : {}),
     });
+    // R20：切回补推——卡按会话过滤后，切走期间推出的卡这个实例没收到。绑定回执之后
+    // 把该会话的在途卡**定向**补给这一个实例（不广播：别人没切回来，不该收重复卡）。
+    // 日志只记 tool 与 requestId，rawInput 绝不落日志（与首推同口径）。
+    if (sessionId) {
+      for (const card of pendingCards.values()) {
+        if (card.sessionId !== sessionId) {
+          continue;
+        }
+        deps.log(
+          `[bridge] permissionRequest resend: ${card.tool} (${card.requestId})`,
+        );
+        sendTo(win, permissionCardMessage(card));
+      }
+    }
   }
 
   /**

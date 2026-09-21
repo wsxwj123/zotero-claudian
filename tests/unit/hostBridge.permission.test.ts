@@ -217,7 +217,7 @@ test("permission: 端点故障（起监听失败）→ SPAWN_FAILED 且不 spawn
 
 // ---- 卡广播（§4.6 宿主→UI 表：字段逐字对齐）----
 
-test("permission: requestPermission → permissionRequest 四字段原样广播（不多不少）", async () => {
+test("🔴 permission: requestPermission → permissionRequest 五字段原样广播（不多不少）", async () => {
   const deps = makeDeps();
   const bridge = createHostBridge(deps);
   const win = makeWin();
@@ -235,6 +235,7 @@ test("permission: requestPermission → permissionRequest 四字段原样广播�
   assert.equal(cards.length, 1);
   assert.deepEqual(cards[0].msg, {
     type: "permissionRequest",
+    sessionId: "sess-x",
     requestId: "req-1",
     tool: "Bash",
     inputSummary: "python -V",
@@ -554,6 +555,10 @@ test("permission 全链路：tools/call → 卡 → 允许并记住 → allow �
   assert.ok(url.startsWith("http://127.0.0.1:51999/mcp?token="));
   const token = url.slice(url.indexOf("token=") + "token=".length);
 
+  // R20：卡按会话过滤 ⇒ 投卡前把这个假 UI 绑到开轮的那条会话
+  // （真机由 sessionList / history 自绑完成，这里直接置位，断言一字不动）
+  ui.state = { ...ui.state, sessionId: deps.store.list()[0].id };
+
   // 3) CLI 侧 tools/call 打到端点（真核心处理；挂起等用户）
   const req: ParsedHttpRequest = {
     method: "POST",
@@ -656,6 +661,10 @@ test("permission 全链路：拒绝 → deny 回包带 message；该轮退出撤
   const mcpJson = args[args.indexOf("--mcp-config") + 1];
   const url = JSON.parse(mcpJson).mcpServers["claudian-perm"].url as string;
   const token = url.slice(url.indexOf("token=") + "token=".length);
+
+  // R20：卡按会话过滤 ⇒ 投卡前把这个假 UI 绑到开轮的那条会话
+  // （真机由 sessionList / history 自绑完成，这里直接置位，断言一字不动）
+  ui.state = { ...ui.state, sessionId: deps.store.list()[0].id };
 
   const base: ParsedHttpRequest = {
     method: "POST",

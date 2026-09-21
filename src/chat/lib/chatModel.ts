@@ -515,6 +515,28 @@ export function acceptsSessionMessage(
   return sessionId === state.sessionId;
 }
 
+/**
+ * R20：未绑定空面板上「别处有待审批」提示的判定（INTERFACE-R20 修订 r3 的公开纯函数）。
+ * 三条同时成立才 true：①视图未绑定 ②已连接 ③会话列表里至少一条 pendingPermission === true。
+ * 只读 state.sessions 的布尔位——非绑定视图里 pendingPermissions 恒为空（卡已被会话守卫挡掉），
+ * 去读它永远算不出 true。脏数据（sessions 非数组 / 条目为 null / 该键非布尔）一律不计入。
+ */
+export function pendingPermissionElsewhere(state: ChatState): boolean {
+  if (state.sessionId !== null || state.connected !== true) {
+    return false;
+  }
+  const sessions: unknown = state.sessions;
+  if (!Array.isArray(sessions)) {
+    return false;
+  }
+  return sessions.some(
+    (s) =>
+      typeof s === "object" &&
+      s !== null &&
+      (s as { pendingPermission?: unknown }).pendingPermission === true,
+  );
+}
+
 // ---- 消息类型分发表：新增桥消息在此加分支，default 兜底忽略 ----
 
 export function reduceHostMessage(
@@ -657,7 +679,12 @@ export function reduceHostMessage(
       };
     }
     case "permissionRequest": {
-      // §4.6 permissionRequest：卡带 requestId，重放/重复广播按 id 幂等去重
+      // R20：卡按会话认领——只有绑到该会话的视图出卡（判定**先于** requestId 校验）。
+      // 老宿主的卡不带 sessionId ⇒ acceptsSessionMessage 放行 ⇒ 全局显示，行为逐字同今天。
+      if (!acceptsSessionMessage(state, msg.sessionId)) {
+        return state;
+      }
+      // §4.6 permissionRequest：卡带 requestId，重放/重复广播（含切回补推）按 id 幂等去重
       if (typeof msg.requestId !== "string" || !msg.requestId) {
         return state;
       }
@@ -964,6 +991,10 @@ function normalizeSessions(raw: unknown): SessionSummary[] {
       // R4-3：用量只在宿主给出合法值时带上（无该字段 = 无数据，UI 不显示该段）。
       // 条件展开而非写 undefined：键存在会打破既有形态断言（deepEqual）与「无数据」语义
       ...(isUsageStats(s.usage) ? { usage: s.usage } : {}),
+      // R20：待审批位归一保留（只认严格布尔；缺键/脏数据不写键 = 无标记，与既有形态断言相容）
+      ...(typeof s.pendingPermission === "boolean"
+        ? { pendingPermission: s.pendingPermission }
+        : {}),
     });
   }
   return out;
