@@ -332,10 +332,13 @@ for (const [label, blocks] of BAD_BLOCKS) {
       },
     } as unknown as HostMessage;
 
-    const view = reduceHostMessage(
-      reduceHostMessage(initialChatState(), { type: "init" } as HostMessage),
-      msg,
-    );
+    let bound = apply(initialChatState(), { type: "init" } as HostMessage);
+    bound = apply(bound, {
+      type: "sessionList",
+      sessions: [{ id: "s-bad" }],
+    } as unknown as HostMessage);
+
+    const view = reduceHostMessage(bound, msg);
 
     const last = view.messages[view.messages.length - 1];
     assert.equal(last.role, "assistant", "仍要建出 assistant 占位轮");

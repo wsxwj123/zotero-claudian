@@ -432,7 +432,8 @@ test("error 桥消息 → 横幅，waiting 拉回 idle（如 SESSION_BUSY）", (
 // ---- history 回放 ----
 
 test("history → 重建消息列表（坏行跳过）", () => {
-  const s = reduceHostMessage(s0(), {
+  const bound = { ...s0(), sessionId: "s1" };
+  const s = reduceHostMessage(bound, {
     type: "history",
     sessionId: "s1",
     messages: [
@@ -652,13 +653,16 @@ test("BUG-12: 消息缺 sessionId（缺省）→ 照常应用", () => {
   assert.equal(s.messages.length, 1);
 });
 
-test("BUG-12: 本实例未绑定会话（sessionId null）→ 不构成串屏，照常应用", () => {
-  const s = reduceHostMessage(st0(), {
+// BUG-12/13 的 null 豁免已被 R4「面板跟随 PDF」证伪：切到没有会话的文献时视图就是合法的未绑定态，
+// 再照收带 sessionId 的消息就是串屏。新口径见 INTERFACE-R19 §2（未绑定 ⇒ 丢弃）。
+test("R19（原 BUG-12）：本实例未绑定会话（sessionId null）→ 丢弃，状态不变", () => {
+  const before = st0();
+  const after = reduceHostMessage(before, {
     type: "streamEvent",
     sessionId: "s9",
     event: { kind: "messageStart" },
   });
-  assert.equal(s.messages.length, 1);
+  assert.deepEqual(after, before);
 });
 
 test("BUG-12: 无关会话的流事件不绕过 BUG-09 守卫（先终止再收到他方事件）", () => {
@@ -713,15 +717,17 @@ test("BUG-13: error 缺 sessionId 字段 → 视为全局错误，横幅 + 解�
   assert.equal(s.errorBanner, "SPAWN_FAILED: spawn 失败");
 });
 
-test("BUG-13: 本实例未绑定会话时，带 sessionId 的错误照常应用", () => {
-  const s = reduceHostMessage(w0(), {
+// 同上：null 豁免已被 R4 面板跟随 PDF 证伪，见 INTERFACE-R19 §2。
+test("R19（原 BUG-13）：本实例未绑定会话时，带 sessionId 的错误 → 丢弃，状态不变", () => {
+  const before = w0();
+  const after = reduceHostMessage(before, {
     type: "error",
     code: "E",
     message: "m",
     sessionId: "s9",
   });
-  assert.equal(s.turnStatus, "idle");
-  assert.equal(s.errorBanner, "E: m");
+  assert.deepEqual(after, before);
+  assert.equal(after.errorBanner, null);
 });
 
 // ---- M5：会话列表绑定（§4.6 sessionList + 记录-02）----

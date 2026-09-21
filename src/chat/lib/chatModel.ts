@@ -498,6 +498,23 @@ export function initialChatState(): ChatState {
   };
 }
 
+/**
+ * R19：会话级消息的唯一归属判定（所有带 sessionId 的桥消息都走这里，不留第二份条件）。
+ * - 消息不带 sessionId（或非字符串）⇒ 全局消息，照常应用（BUG-12/BUG-13 老契约）。
+ * - 带 sessionId ⇒ 只认等于当前绑定的那条；未绑定（sessionId===null）恒不相等 ⇒ 丢弃。
+ *   R4「面板跟随 PDF」之后，「未绑定」是用户切到没有会话的文献的合法常态，
+ *   不再是 BUG-12 时代「刚起来没绑过、不可能串屏」的豁免条件。
+ */
+export function acceptsSessionMessage(
+  state: ChatState,
+  sessionId: unknown,
+): boolean {
+  if (typeof sessionId !== "string") {
+    return true;
+  }
+  return sessionId === state.sessionId;
+}
+
 // ---- 消息类型分发表：新增桥消息在此加分支，default 兜底忽略 ----
 
 export function reduceHostMessage(
@@ -517,24 +534,17 @@ export function reduceHostMessage(
     case "branchCreated":
       return reduceBranchCreated(state, msg);
     case "streamEvent":
-      // BUG-12：双实例广播——仅应用当前会话的流事件；消息缺 sessionId（缺省）
-      // 或本实例尚未绑定会话时不构成串屏，照常应用
-      if (
-        typeof msg.sessionId === "string" &&
-        state.sessionId !== null &&
-        msg.sessionId !== state.sessionId
-      ) {
+      // BUG-12/R19：双实例广播——带 sessionId 的流事件只归绑定该会话的视图；
+      // 未绑定视图（切到没聊过的文献）一概不收，缺 sessionId 的老宿主形态照常应用
+      if (!acceptsSessionMessage(state, msg.sessionId)) {
         return state;
       }
       return reduceStreamEvent(state, msg.event);
     case "history":
-      // 他方会话的回放不落到本视图（与 BUG-12 同口径）；进行中 turn 的在途轮次
-      // 由 reduceHistory 保住（BUG-23/26：回放照常应用，但不抹掉本地乐观轮）
-      if (
-        typeof msg.sessionId === "string" &&
-        state.sessionId !== null &&
-        msg.sessionId !== state.sessionId
-      ) {
+      // 非本视图会话的回放不落地（与 streamEvent 同口径，含未绑定视图——开轮广播的
+      // history 正是点亮空面板的第一张多米诺）；进行中 turn 的在途轮次由 reduceHistory
+      // 保住（BUG-23/26：回放照常应用，但不抹掉本地乐观轮）
+      if (!acceptsSessionMessage(state, msg.sessionId)) {
         return state;
       }
       return reduceHistory(state, msg.messages, msg.inFlight);
@@ -543,9 +553,9 @@ export function reduceHostMessage(
       // （多实例广播，各看各的）；entries 归一（非字符串/缺字段一律丢，坏输入不崩）。
       const sid = typeof msg.sessionId === "string" ? msg.sessionId : "";
       if (!sid) {
-        return state;
+        return state; // 缺 sessionId 的输入历史无处可落（要写 inputHistory.sessionId）
       }
-      if (state.sessionId !== null && sid !== state.sessionId) {
+      if (!acceptsSessionMessage(state, sid)) {
         return state;
       }
       return {
@@ -578,13 +588,10 @@ export function reduceHostMessage(
       return followReader(next, itemKey).state;
     }
     case "error": {
-      // BUG-13：仅当前会话的错误才影响本视图（横幅/解锁 waiting）；
-      // 无关会话的错误整体忽略——错误消息缺 sessionId 字段视为全局错误照常应用
-      if (
-        typeof msg.sessionId === "string" &&
-        state.sessionId !== null &&
-        msg.sessionId !== state.sessionId
-      ) {
+      // BUG-13/R19：仅当前绑定会话的错误才影响本视图（横幅/解锁 waiting）；
+      // 非本视图会话的错误整体忽略（未绑定视图同样不收）——
+      // 缺 sessionId 字段的错误是全局错误（如 SPAWN_FAILED），照常应用
+      if (!acceptsSessionMessage(state, msg.sessionId)) {
         return state;
       }
       const errored: ChatState = {
@@ -702,12 +709,9 @@ export function reduceHostMessage(
       };
     }
     case "usageStats": {
-      // R4-3：与 streamEvent/history 同口径——只管当前绑定会话的（多实例广播，各看各的）
-      if (
-        typeof msg.sessionId === "string" &&
-        state.sessionId !== null &&
-        msg.sessionId !== state.sessionId
-      ) {
+      // R4-3：与 streamEvent/history 同口径——只管当前绑定会话的（多实例广播，各看各的）；
+      // 未绑定时整条丢弃（含列表级的 total），与「绑到别的会话」一致，下次 sessionList 会带回用量
+      if (!acceptsSessionMessage(state, msg.sessionId)) {
         return state;
       }
       // total 就地并入该会话的列表条目：显示口径只有一处（sessions[].usage），
@@ -2955,7 +2959,7 @@ export function reduceAttachmentSaved(
   state: ChatState,
   evt: Extract<HostMessage, { type: "attachmentSaved" }>,
 ): ChatState {
-  if (typeof evt.sessionId === "string" && evt.sessionId !== state.sessionId) {
+  if (!acceptsSessionMessage(state, evt.sessionId)) {
     return state;
   }
   const rejected = Array.isArray(evt.rejected) ? evt.rejected : [];

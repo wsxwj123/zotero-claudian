@@ -605,7 +605,7 @@ test("D11-6b: 边界——删掉「最后一个」会话（解绑）→ UI 立�
   // 对照组：视图在途（waiting）时同一事件会被应用 → 证明「errorBanner 变化」是本事件的
   // 可观测效应，下面的 null 断言才有意义（OBS-4：只看 turnStatus 等于假绿——两条路径都是 idle）
   const inFlight = feed(
-    { ...s, turnStatus: "waiting" },
+    { ...s, sessionId: "S1", turnStatus: "waiting" },
     { type: "streamEvent", sessionId: "S1", event: killed },
   );
   assert.ok(
