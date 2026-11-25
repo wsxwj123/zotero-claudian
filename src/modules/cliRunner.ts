@@ -281,6 +281,25 @@ const SESSION_GONE_PATTERNS = [
 ].map((kw) => kw.toLowerCase());
 
 /**
+ * 一段 CLI 报错文字是否表明「续接的会话已不存在」（不区分大小写，关键字表即 SESSION_GONE_PATTERNS）。
+ * procError 的 stderr 判定（classifyProcError）与宿主对 resultError.errors 的判定（R21 修法 E）共用。
+ */
+export function isSessionGoneText(text: string): boolean {
+  const lower = (text || "").toLowerCase();
+  return SESSION_GONE_PATTERNS.some((kw) => lower.includes(kw));
+}
+
+/**
+ * 结束行 errors 的一条是否「以」失效关键字开头（去首尾空白、不区分大小写）。
+ * 比 isSessionGoneText 严：errors 可能收录接口错误正文（第三方网关的 `API Error: 404 … Session not found`）
+ * 或 CLI 运行中记下的其他错误（如 MCP 的 "Session not found"），句中包含不算（R21 回归补修的收紧）。
+ */
+export function startsWithSessionGoneKeyword(text: string): boolean {
+  const lower = (text || "").trim().toLowerCase();
+  return SESSION_GONE_PATTERNS.some((kw) => lower.startsWith(kw));
+}
+
+/**
  * 「可执行文件/命令找不到」的报错原文（W-A11：只认 node ENOENT 会在 Windows 上漏判）：
  * - node（darwin/linux）：ENOENT / no such file / file not found；
  * - Gecko Subprocess（win32）：`File at path "…" does not exist, or is not executable`
@@ -310,6 +329,11 @@ export function classifyProcError(input: {
   if (input.reason === "CLAUDE_NOT_FOUND" || input.reason === "ENOENT") {
     return "CLAUDE_NOT_FOUND";
   }
+  // R21：用户中断导致的退出是预期收尾——被 kill 的进程 stderr 里碰巧出现 session/找不到
+  // 之类字样也不得触发 SESSION_GONE 广播（会清掉有效的 claudeSessionId）或丢 CLI 解析缓存
+  if (input.reason === "INTERRUPTED") {
+    return "GENERIC";
+  }
   if (input.exitCode === 0) {
     return "GENERIC";
   }
@@ -320,8 +344,7 @@ export function classifyProcError(input: {
   if (SPAWN_MISSING_RE.test(tail)) {
     return "CLAUDE_NOT_FOUND";
   }
-  const lowerTail = tail.toLowerCase();
-  if (SESSION_GONE_PATTERNS.some((kw) => lowerTail.includes(kw))) {
+  if (isSessionGoneText(tail)) {
     return "SESSION_GONE";
   }
   return "GENERIC";
@@ -363,7 +386,10 @@ export interface ProcErrorEvent {
   kind: "procError";
   exitCode: number | null;
   stderrTail?: string;
-  /** spawn ENOENT → "CLAUDE_NOT_FOUND"（安装引导卡） */
+  /**
+   * spawn ENOENT → "CLAUDE_NOT_FOUND"（安装引导卡）；
+   * 用户中断导致的退出 → 宿主广播前补 "INTERRUPTED"（UI 回空闲、不置横幅）
+   */
   reason?: string;
 }
 
@@ -404,7 +430,7 @@ export interface TurnHandle {
 /** stderr 内存上限（事件里再截 500 字符，双保险防超长 stderr 撑爆内存） */
 const STDERR_KEEP_CHARS = 8192;
 /** procError.stderrTail 截取上限（INTERFACE §4.2） */
-const STDERR_TAIL_CHARS = 500;
+export const STDERR_TAIL_CHARS = 500;
 /** 空串读到的重试间隔（毫秒）——给流式解码缓冲补齐/进程退出留时间，非 EOF 时快速重读 */
 const EMPTY_READ_RETRY_MS = 25;
 /**
@@ -467,8 +493,10 @@ function isSpawnEnoent(err: unknown): boolean {
 /**
  * 拉起一轮 CLI 进程（turn-per-spawn）：
  * stdin 写 prompt 后 close → stdout 按 \n 分帧逐行喂 mapStreamLine → stderr 收尾 → wait 退出。
- * 终止契约：见到 result 事件即认为 turn 正常收尾；退出时无 result（含被 kill）→
- * 补发一条 procError（exitCode 任意，exit 0 无 result 也补发防 UI 卡 waiting）；
+ * 终止契约：见到结束行（result 或 resultError）即认为该轮已收尾——resultError 已由 UI
+ * 显示具体失败原因，其后进程以非 0 退出（接口报错时 CLI 实测 exit 1）不再补发 procError；
+ * 退出时无任何结束行（含被 kill）→ 补发一条 procError（exitCode 任意，exit 0 无结束行也补发
+ * 防 UI 卡 waiting；用户中断导致的那条由宿主补 reason "INTERRUPTED"，见 hostBridge.onTurnEvent）；
  * spawn 失败 → procError {exitCode:null, reason: ENOENT 时 "CLAUDE_NOT_FOUND"}。
  * 本函数不抛错：一切失败走 onEvent(procError) + exitPromise resolve。
  */
@@ -478,6 +506,9 @@ export function spawnTurn(
 ): TurnHandle {
   const log = opts.logger ?? (() => {});
   let proc: ProcHandleLike | null = null;
+  // R21：kill() 可能早于进程拉起（callCli 仍在 await，proc 为 null）——记下请求，
+  // 拉起成功后立即补杀；否则终止指令丢失，宿主已置 interrupting 而进程照跑完整轮
+  let killRequested = false;
 
   const emitProcError = (event: ProcErrorEvent): void => {
     try {
@@ -548,10 +579,21 @@ export function spawnTurn(
       }
     }
     const p = proc;
+    // 两条拉起路径（直接 / sh 包装失败后回退）都汇到这里：拉起前已请求终止 → 立即终止。
+    // 该轮照常读流至退出：无结束行 → 补发 procError，由宿主按 interrupting 标 INTERRUPTED
+    if (killRequested) {
+      log("[cliRunner] kill requested before spawn completed → killing now");
+      try {
+        p.kill();
+      } catch (err) {
+        log(`[cliRunner] kill failed: ${String(err)}`);
+      }
+    }
 
     // prompt 恒走 stdin，写入后关闭（§4.1）；write/close 失败不影响流读（进程会自行报错退出）
+    // 已被终止的进程不再喂 prompt，只关 stdin
     try {
-      p.stdin.write(opts.prompt);
+      if (!killRequested) p.stdin.write(opts.prompt);
     } catch (err) {
       log(`[cliRunner] stdin write failed: ${String(err)}`);
     }
@@ -561,7 +603,8 @@ export function spawnTurn(
       log(`[cliRunner] stdin close failed: ${String(err)}`);
     }
 
-    let sawResult = false;
+    // 是否见到结束行（result 或 resultError）：见到即该轮已收尾，退出后不补发 procError
+    let sawTerminal = false;
     let stderrTail = "";
 
     const handleLine = (rawLine: string): void => {
@@ -571,7 +614,9 @@ export function spawnTurn(
       if (!mapped) return;
       const events = Array.isArray(mapped) ? mapped : [mapped];
       for (const event of events) {
-        if (event.kind === "result") sawResult = true;
+        if (event.kind === "result" || event.kind === "resultError") {
+          sawTerminal = true;
+        }
         try {
           opts.onEvent(event);
         } catch (err) {
@@ -622,7 +667,7 @@ export function spawnTurn(
     }
     await Promise.allSettled([readStdout, readStderr]);
 
-    if (!sawResult) {
+    if (!sawTerminal) {
       emitProcError({
         kind: "procError",
         exitCode,
@@ -633,6 +678,7 @@ export function spawnTurn(
 
   return {
     kill(): void {
+      killRequested = true;
       try {
         proc?.kill();
       } catch (err) {

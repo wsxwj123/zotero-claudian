@@ -12,6 +12,8 @@
 import {
   buildSpawnArgs,
   classifyProcError,
+  startsWithSessionGoneKeyword,
+  STDERR_TAIL_CHARS,
   PERMISSION_MODES,
   type PermissionMode,
   type SpawnTurnOptions,
@@ -515,12 +517,101 @@ interface SessionRuntime {
    * result 到达即清空（该轮收尾）；不参与 index 以外的任何逻辑。
    */
   turnUsage: UsageStats | null;
+  /**
+   * R21：本轮被接受的时刻（`Date.now()`，量耗时用，不用注入的业务时钟 deps.now）；
+   * 只供 procError 调试日志的 elapsedMs。0 = 尚无轮次。
+   */
+  turnStartedAt: number;
+  /** R21 修法 E：本轮是否已广播过 SESSION_GONE（resultError 与 procError 可能先后命中；新轮开始/轮次结束复位） */
+  sessionGoneNotified: boolean;
+  /**
+   * R21 收紧：本轮是否带 `--resume` 续接已有 CLI 会话（普通续接 = 会话已有编号；分叉首轮 = 父编号）。
+   * 只有续接轮才可能「会话已不存在」——非续接轮上出现失效字样一律不判。开轮复位，组装参数时置位。
+   */
+  resumedTurn: boolean;
 }
 
 /** 会话运行时快照（测试与宿主日志用） */
 export interface SessionRuntimeSnapshot {
   sessionId: string;
   busy: "running" | "interrupting" | null;
+}
+
+/** procError 调试日志 stderr= 的保留长度（取净化后的末尾；与 cliRunner 的 stderr 截断上限同值） */
+const LOG_STDERR_CHARS = STDERR_TAIL_CHARS;
+
+/** 「名字=值」形态的值字符：在空白、&、引号、;、, 处结束 */
+const ASSIGN_VALUE = String.raw`[^\s&"'` + "`" + String.raw`;,]+`;
+const TOKEN_ASSIGN_RE = new RegExp(
+  String.raw`(token=["']?)` + ASSIGN_VALUE,
+  "gi",
+);
+/** 大写名字（字母/数字/下划线）= 值；前置否定断言保证每个名字串只从开头尝试一次（线性） */
+const UPPER_ASSIGN_RE = new RegExp(
+  String.raw`(?<![A-Z0-9_])([A-Z0-9_]+=)(["']?)` + ASSIGN_VALUE,
+  "g",
+);
+const X_API_KEY_RE = new RegExp(
+  String.raw`(x-api-key:[ \t]*["']?)` + ASSIGN_VALUE,
+  "gi",
+);
+const SECRET_NAME_SUFFIXES = ["_KEY=", "_TOKEN=", "_SECRET="];
+
+/**
+ * procError 调试日志的 stderr 净化（R21 修法 F 及其收紧，INTERFACE §4.2）。整条链路的实际顺序：
+ * cliRunner 先把 stderr 截到末尾 STDERR_TAIL_CHARS 字 → 本函数 ⓪ 若长度已达该上限，开头可能是被切断的
+ * 密钥残段（已失去 `sk-` 等前缀、打码规则认不出），丢弃第一个空白字符之前的部分（无空白则整段照常处理）→
+ * ① 打码 → ② 转义 → ③ 取末尾 LOG_STDERR_CHARS 字（转义会变长；此时密钥已打码，截断只会切到 `***`
+ * 或转义序列的残段）。
+ * ① 打码（→ `***`）：`sk-` 加 `ant-` 前缀的密钥串；sk- 后接 ≥20 个 [A-Za-z0-9_-]；URL 的 `用户:口令@`；token= 的值；
+ *    Bearer 后的值；x-api-key: 后的值；XXX_KEY= / XXX_TOKEN= / XXX_SECRET=（大写名字）的值。
+ *    「名字=值」的值可带一个开引号，在空白、&、引号、;、, 处结束。
+ * ② 换行（\r\n、\r、\n）→ 字面 `\n`；其余控制字符 / 行分隔符 / 双向控制符 → `\u{十六进制}`。
+ * 各正则相邻量词字符类互斥（或以定长字面量隔开），大写名字规则带前置否定断言，匹配均为线性。
+ */
+export function sanitizeStderrForLog(raw: string): string {
+  let input = raw;
+  if (input.length >= STDERR_TAIL_CHARS) {
+    const firstSpace = input.search(/\s/);
+    if (firstSpace >= 0) input = input.slice(firstSpace);
+  }
+  const redacted = input
+    .replace(/sk-(?:ant)-[A-Za-z0-9_-]+/g, "***")
+    .replace(/sk-[A-Za-z0-9_-]{20,}/g, "***")
+    .replace(/:\/\/[^\s/@:]+:[^\s/@]+@/g, "://***@")
+    .replace(TOKEN_ASSIGN_RE, "$1***")
+    .replace(/(Bearer\s+)[^\s"']+/gi, "$1***")
+    .replace(X_API_KEY_RE, "$1***")
+    .replace(UPPER_ASSIGN_RE, (whole: string, name: string, quote: string) =>
+      SECRET_NAME_SUFFIXES.some(
+        (suffix) => name.endsWith(suffix) && name.length > suffix.length,
+      )
+        ? `${name}${quote}***`
+        : whole,
+    );
+  let out = "";
+  for (let i = 0; i < redacted.length; i++) {
+    const code = redacted.charCodeAt(i);
+    if (code === 0x0d) {
+      // \r\n 合为一个换行
+      if (redacted.charCodeAt(i + 1) === 0x0a) i++;
+      out += "\\n";
+    } else if (code === 0x0a) {
+      out += "\\n";
+    } else if (
+      code <= 0x1f ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0x2028 ||
+      code === 0x2029 ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
+      out += `\\u{${code.toString(16)}}`;
+    } else {
+      out += redacted[i];
+    }
+  }
+  return out.slice(-LOG_STDERR_CHARS);
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -822,6 +913,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         turnBlocks: [],
         messageSeq: 0,
         turnUsage: null,
+        turnStartedAt: 0,
+        sessionGoneNotified: false,
+        resumedTurn: false,
       };
       runtimes.set(id, rt);
     }
@@ -1234,10 +1328,63 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     });
   }
 
-  function onTurnEvent(targetSessionId: string, event: TurnEvent): void {
-    deps.log(`[bridge] turn event: ${event.kind} (session ${targetSessionId})`);
-    broadcast({ type: "streamEvent", sessionId: targetSessionId, event });
+  /**
+   * 「CLI 侧会话已不存在」的统一处理（§4.2 / §4.6 错误码表）：广播 SESSION_GONE（UI 给「新建会话」按钮）
+   * 并清掉索引里的死 claudeSessionId。来源有二：带错误的结束行 resultError.errors（CLI 2.1.x 的
+   * `--resume <不存在>` 形态）与无结束行退出的 procError.stderrTail。同一轮只处理一次。
+   */
+  function handleSessionGone(
+    targetSessionId: string,
+    rt: SessionRuntime,
+    source: "resultError" | "procError",
+  ): void {
+    if (rt.sessionGoneNotified) return;
+    rt.sessionGoneNotified = true;
+    deps.log(`[bridge] ${source} classified SESSION_GONE`);
+    broadcast({
+      type: "error",
+      code: "SESSION_GONE",
+      message: "续接失败：CLI 侧会话已不存在（--resume 失效），请新建会话",
+      sessionId: targetSessionId,
+    });
+    // BUG-25：死 id 必须清出索引——否则同会话再发仍拼 --resume，永远复读同一错误。
+    // 清 id 后本轮就是首轮语义（CLI 侧起新会话），不必强迫用户新建会话。
+    // 用 update 的 promise 串列表广播：列表要反映清除后的 claudeSessionId。
+    void deps.sessions
+      .update(targetSessionId, { claudeSessionId: null })
+      .catch((err: unknown) => {
+        deps.log(
+          `[bridge] clear stale claudeSessionId failed (${targetSessionId}): ${String(err)}`,
+        );
+      })
+      .then(() => pushSessionList());
+  }
+
+  function onTurnEvent(targetSessionId: string, rawEvent: TurnEvent): void {
+    deps.log(
+      `[bridge] turn event: ${rawEvent.kind} (session ${targetSessionId})`,
+    );
     const rt = runtimes.get(targetSessionId);
+    let event = rawEvent;
+    if (event.kind === "procError") {
+      // R21：kill 已发（busy==="interrupting"）后的无结束行退出是用户中断的预期结果——
+      // 广播前补 reason，UI 据此回空闲而不置「CLI 进程异常退出」横幅。已带 reason
+      // （spawn 失败 / 命令组装失败）的保持原样
+      const interrupted = rt?.busy === "interrupting";
+      if (interrupted && !event.reason) {
+        event = { ...event, reason: "INTERRUPTED" };
+      }
+      // 每条 procError 一行：真实异常退出此前只在横幅里留痕，用户报障时无从追查
+      const elapsedMs =
+        rt && rt.turnStartedAt > 0
+          ? Math.max(0, Math.round(Date.now() - rt.turnStartedAt))
+          : 0;
+      const stderrForLog = sanitizeStderrForLog(event.stderrTail ?? "");
+      deps.log(
+        `[bridge] procError exit=${event.exitCode ?? "null"} interrupted=${interrupted} elapsedMs=${elapsedMs} session=${targetSessionId} stderr=${stderrForLog}`,
+      );
+    }
+    broadcast({ type: "streamEvent", sessionId: targetSessionId, event });
     if (!rt) return;
     switch (event.kind) {
       case "init":
@@ -1370,6 +1517,21 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         // 不清的话，下一轮若 result 不带 usage（老 CLI/provider 不报），resolveTurnUsage 会把
         // 这个失败轮累加进来的用量错并进下一轮（张冠李戴）。
         rt.turnUsage = null;
+        // R21 修法 E：续接已不存在的会话时 CLI 先给带错误的结束行（errors 含失效关键字）再非 0 退出，
+        // 而有结束行的轮次不再补发 procError——识别必须在这里做。用户中断中（interrupting）不判：
+        // 与 procError 的 INTERRUPTED 豁免一致，宁可漏判一轮（下轮仍会再报、再识别），不误清有效编号
+        // 收紧（复判）：须同时满足 ① 续接轮 ② subtype 恰为 error_during_execution（接口错误 api_error 等的
+        // 正文可能来自第三方网关、含同样字样）③ 某条 errors 以关键字开头（句中包含可能是 MCP 等其他错误）。
+        // 漏判的代价是多失败一轮，误判清掉有效编号不可逆，故取严格条件
+        if (
+          rt.busy !== "interrupting" &&
+          rt.resumedTurn &&
+          event.subtype === "error_during_execution" &&
+          Array.isArray(event.errors) &&
+          event.errors.some((e) => startsWithSessionGoneKeyword(String(e)))
+        ) {
+          handleSessionGone(targetSessionId, rt, "resultError");
+        }
         break;
       }
       case "procError": {
@@ -1377,7 +1539,8 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
         rt.turnUsage = null;
         // 命令组装失败（ARG_HAS_NEWLINE / ARG_HAS_PERCENT / ARG_BREAKS_QUOTING / CMD_LINE_TOO_LONG）带 reason 直落日志：
         // 用户报障时凭这条定位「CLI 进程异常退出」的真实原因（§2.10 B）
-        if (event.reason) {
+        // INTERRUPTED 不重复记：上面的 procError 行已含 interrupted=true
+        if (event.reason && event.reason !== "INTERRUPTED") {
           deps.log(
             `[bridge] procError reason=${event.reason} session=${targetSessionId}`,
           );
@@ -1396,26 +1559,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           );
           deps.invalidateCliResolve?.();
         }
+        // 无结束行退出的失效判定保持原条件（不要求续接轮；收紧只作用于 resultError 路径）
         if (kind === "SESSION_GONE") {
-          deps.log("[bridge] procError classified SESSION_GONE");
-          broadcast({
-            type: "error",
-            code: "SESSION_GONE",
-            message:
-              "续接失败：CLI 侧会话已不存在（--resume 失效），请新建会话",
-            sessionId: targetSessionId,
-          });
-          // BUG-25：死 id 必须清出索引——否则同会话再发仍拼 --resume，永远复读同一错误。
-          // 清 id 后本轮就是首轮语义（CLI 侧起新会话），不必强迫用户新建会话。
-          // 用 update 的 promise 串列表广播：列表要反映清除后的 claudeSessionId。
-          void deps.sessions
-            .update(targetSessionId, { claudeSessionId: null })
-            .catch((err: unknown) => {
-              deps.log(
-                `[bridge] clear stale claudeSessionId failed (${targetSessionId}): ${String(err)}`,
-              );
-            })
-            .then(() => pushSessionList());
+          handleSessionGone(targetSessionId, rt, "procError");
         }
         break;
       }
@@ -1686,6 +1832,9 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
     }
 
     rt.busy = "running";
+    rt.turnStartedAt = Date.now();
+    rt.sessionGoneNotified = false;
+    rt.resumedTurn = false;
     rt.pendingUserText = text;
     rt.assistantText = "";
     rt.streamText = "";
@@ -1896,15 +2045,18 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
           `[bridge] allowedTools: dropped ${record.allowedTools.length - safeTools.length} unsafe rule(s) (session ${sessionId})`,
         );
       }
+      const resumeIdForTurn = forkReady
+        ? forkParentCli
+        : record.claudeSessionId;
+      // R21 收紧：按实际是否带 --resume 记（buildSpawnArgs 以 resumeClaudeSessionId 真值决定）
+      rt.resumedTurn = Boolean(resumeIdForTurn);
       const args = buildSpawnArgs({
         permissionMode: record.permissionMode,
         mcpPort: mcp.port,
         mcpToken: mcp.token,
         mcpConfigPath,
         // 分叉：resume 父会话并让 CLI 另开新 id；普通轮照旧 resume 自己的 id
-        resumeClaudeSessionId: forkReady
-          ? forkParentCli
-          : record.claudeSessionId,
+        resumeClaudeSessionId: resumeIdForTurn,
         forkSession: forkReady,
         addDir: input.addDir,
         addDirs: input.addDirs,
@@ -1991,6 +2143,7 @@ export function createHostBridge(deps: HostBridgeDeps): HostBridge {
             deps.log("[bridge] turn exit: session unlocked");
             rt.busy = null;
             rt.turn = null;
+            rt.sessionGoneNotified = false;
           }
           if (sawResult) {
             // R7-H：每轮（成功）结束拍快照。此刻 CLI 自己的 jsonl 已写完（进程退出）。

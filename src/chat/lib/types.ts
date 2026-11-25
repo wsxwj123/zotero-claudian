@@ -96,6 +96,7 @@ export type StreamEvent =
       kind: "procError";
       exitCode: number | null;
       stderrTail?: string;
+      /** "CLAUDE_NOT_FOUND"：CLI 未找到；"INTERRUPTED"：用户中断导致的退出（宿主补，UI 不置横幅） */
       reason?: string;
     };
 

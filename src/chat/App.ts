@@ -1522,6 +1522,13 @@ function InputBox(props: {
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
+    // R23：回车一律不向外层冒泡。宿主 Zotero 的条目面板（itemDetails 的 _handleKeydown，冒泡阶段）
+    // 把「Enter 且目标带类名 input」当作它自己的字段提交，随即把焦点移走（条目列表或阅读器）；
+    // 本输入框恰好也叫 input，于是 Shift+Enter 的换行、输入法上屏的回车都落空，发送后也会失焦。
+    // 只截断传递，preventDefault 仍按下面各分支原样决定；其他键（含 Escape）照旧冒泡。
+    if (e.key === "Enter") {
+      e.stopPropagation();
+    }
     // 命令面板展开时的键先归它所有（↑↓ 选项、回车选中、Esc 收起）
     if (commands.open && commands.items.length > 0) {
       if (e.key === "ArrowDown") {

@@ -1671,6 +1671,20 @@ export function reduceStreamEvent(
       };
     }
     case "procError": {
+      // R21：用户中断导致的进程退出（宿主据 busy==="interrupting" 补 reason）属预期收尾，
+      // 不是故障——回空闲、清横幅与错误码、本轮记 aborted。未本地点中断的视图（如另一窗口）
+      // 同样据此收尾，故 aborted 在这里落下，不依赖 interrupt() 是否在本视图执行过
+      if (event.reason === "INTERRUPTED") {
+        return {
+          ...state,
+          turnStatus: "idle",
+          waitingSince: null,
+          pendingPermissions: [],
+          errorBanner: null,
+          errorCode: null,
+          lastTurnEnd: { round: lastUserIndex(state.messages), end: "aborted" },
+        };
+      }
       if (event.reason === "CLAUDE_NOT_FOUND") {
         return {
           ...state,
